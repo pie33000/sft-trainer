@@ -3,7 +3,6 @@ import os
 import time
 from dataclasses import dataclass
 
-import tiktoken
 import torch
 import torch.distributed as dist
 import torch.nn as nn
@@ -204,10 +203,13 @@ ddp_rank = int(os.environ["RANK"])
 ddp_local_rank = int(os.environ["LOCAL_RANK"])
 ddp_world_size = int(os.environ["WORLD_SIZE"])
 device = f"cuda:{ddp_local_rank}"
-print(f"device: {device}")
-print(f"ddp_world_size: {ddp_world_size}")
-print(f"ddp_local_rank: {ddp_local_rank}")
-print(f"ddp_rank: {ddp_rank}")
+
+print("-----------------------------------------------------------------------------\n")
+print(
+    f"Init device {device}, rank {ddp_rank}, local rank {ddp_local_rank}, world size {ddp_world_size}"
+)
+print("-----------------------------------------------------------------------------\n")
+
 torch.cuda.set_device(device)
 init_process_group(backend="nccl")
 
@@ -226,6 +228,12 @@ trainer = SFTTrainer(
     process_rank=ddp_rank,
     ddp_local_rank=ddp_local_rank,
 )
-
+print("-----------------------------------------------------------------------------\n")
+print("Training ....")
 trainer.train()
+print("-----------------------------------------------------------------------------\n")
+
+print("-----------------------------------------------------------------------------\n")
+print("Destroying process group ....")
 destroy_process_group()
+print("-----------------------------------------------------------------------------\n")
