@@ -38,11 +38,11 @@ class SFTDataset:
 @dataclass
 class TrainingConfig:
     batch_size: int
-    min_lr: float
-    max_lr: float
-    warmer_steps: int
-    max_steps: int
     sequence_length: int
+    min_lr: float = 6e-4 * 0.1
+    max_lr: float = 6e-4
+    warmer_steps: int = 10
+    max_steps: int = 500
 
 
 class SFTTrainer(nn.Module):
@@ -58,8 +58,11 @@ class SFTTrainer(nn.Module):
         ddp_local_rank=0,
     ):
         super(SFTTrainer, self).__init__()
-        model = dynamic_model(model)
-        self.model = DDP(model, device_ids=[ddp_local_rank])
+        self.create_log_dir()
+        self.model_wrapped = dynamic_model(model)
+        print(dir(self.model_wrapped))
+        print(type(self.model_wrapped))
+        self.model = DDP(self.model_wrapped, device_ids=[ddp_local_rank])
         self.raw_model = self.model.module
 
         self.optimizer = self.raw_model.configure_optimizers(
@@ -85,6 +88,10 @@ class SFTTrainer(nn.Module):
             * self.training_config.sequence_length
             * self.num_processes
         )
+
+    def create_log_dir(self):
+        log_dir = "log"
+        os.makedirs(log_dir, exist_ok=True)
 
     def get_lr(self, iter):
         # 1) linear warmup for warmup_iters steps
@@ -144,19 +151,22 @@ class SFTTrainer(nn.Module):
             last_step = step == self.training_config.max_steps - 1
 
             # do one step of the optimization
-            model.train()
+            self.model.train()
             self.optimizer.zero_grad()
             loss_accum = 0.0
             for micro_step in range(self.grad_accum_steps):
                 x, y = dataloader.next_batch()
+                if x is None or y is None:
+                    dataloader.reset()
+                    x, y = dataloader.next_batch()
                 x, y = x.to(device), y.to(device)
                 # added after video, this field is also used by the forward pass.
 
-                model.require_backward_grad_sync = (
+                self.model.require_backward_grad_sync = (
                     micro_step == self.grad_accum_steps - 1
                 )
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits, loss = model(x, y)
+                    logits, loss = self.model(x, targets=y)
                 # we have to scale the loss to account for gradient accumulation,
                 # because the gradients just add on each successive backward().
                 # addition of gradients corresponds to a SUM in the objective, but
@@ -166,7 +176,7 @@ class SFTTrainer(nn.Module):
                 loss.backward()
 
             dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
-            norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             # determine and set the learning rate for this iteration
             lr = self.get_lr(step)
             for param_group in self.optimizer.param_groups:
@@ -194,6 +204,10 @@ ddp_rank = int(os.environ["RANK"])
 ddp_local_rank = int(os.environ["LOCAL_RANK"])
 ddp_world_size = int(os.environ["WORLD_SIZE"])
 device = f"cuda:{ddp_local_rank}"
+print(f"device: {device}")
+print(f"ddp_world_size: {ddp_world_size}")
+print(f"ddp_local_rank: {ddp_local_rank}")
+print(f"ddp_rank: {ddp_rank}")
 torch.cuda.set_device(device)
 init_process_group(backend="nccl")
 
@@ -201,14 +215,16 @@ enc = get_tokenizer()
 ds = load_dataset("meta-math/MetaMathQA")
 sft_dataset = SFTDataset(dataset=ds, instruction_key="query", answer_key="response")
 training_config = TrainingConfig(batch_size=4, sequence_length=512)
-model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
+model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2").to(device)
 trainer = SFTTrainer(
     model=model,
     encoder=enc,
     sft_dataset=sft_dataset,
     training_config=training_config,
     device=device,
-    num_processes=1,
+    num_processes=ddp_world_size,
+    process_rank=ddp_rank,
+    ddp_local_rank=ddp_local_rank,
 )
 
 trainer.train()
