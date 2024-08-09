@@ -3,9 +3,11 @@ import os
 import time
 from dataclasses import dataclass
 
+import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
+import torch.nn.functional as F
 from datasets import (
     Dataset,
     DatasetDict,
@@ -29,9 +31,12 @@ from utils import get_tokenizer
 
 @dataclass
 class SFTDataset:
-    dataset: DatasetDict | Dataset | IterableDatasetDict | IterableDataset
+    training_dataset: DatasetDict | Dataset | IterableDatasetDict | IterableDataset
     instruction_key: str
     answer_key: str
+    validation_dataset: (
+        DatasetDict | Dataset | IterableDatasetDict | IterableDataset | None
+    ) = None
 
 
 @dataclass
@@ -42,6 +47,8 @@ class TrainingConfig:
     max_lr: float = 6e-4
     warmer_steps: int = 10
     max_steps: int = 500
+    validation_steps: int = 10
+    checkpoint_steps: int = 20
 
 
 class SFTTrainer(nn.Module):
@@ -52,17 +59,19 @@ class SFTTrainer(nn.Module):
         sft_dataset: SFTDataset,
         training_config: TrainingConfig,
         device,
+        device_type,
         process_rank=0,
         num_processes=8,
         ddp_local_rank=0,
+        is_ddp_run=False,
     ):
         super(SFTTrainer, self).__init__()
         self.create_log_dir()
-        self.model_wrapped = dynamic_model(model)
-        print(dir(self.model_wrapped))
-        print(type(self.model_wrapped))
-        self.model = DDP(self.model_wrapped, device_ids=[ddp_local_rank])
-        self.raw_model = self.model.module
+        self.is_ddp_run = is_ddp_run
+        self.model = dynamic_model(model)
+        if self.is_ddp_run:
+            self.model = DDP(self.model_wrapped, device_ids=[ddp_local_rank])
+        self.raw_model = self.model.module if self.is_ddp_run else self.model
 
         self.optimizer = self.raw_model.configure_optimizers(
             weight_decay=0.1,
@@ -73,6 +82,7 @@ class SFTTrainer(nn.Module):
 
         self.encoder = encoder
         self.device = device
+        self.device_type = device_type
         self.sft_dataset = sft_dataset
         self.training_config = training_config
 
@@ -82,11 +92,16 @@ class SFTTrainer(nn.Module):
         self.master_process = self.process_rank == 0
         self.num_processes = num_processes
         self.ddp_local_rank = ddp_local_rank
-        self.grad_accum_steps = 20000 // (
-            self.training_config.batch_size
-            * self.training_config.sequence_length
-            * self.num_processes
+        self.grad_accum_steps = max(
+            10,
+            10
+            // (
+                self.training_config.batch_size
+                * self.training_config.sequence_length
+                * self.num_processes
+            ),
         )
+        print(self.grad_accum_steps)
 
     def create_log_dir(self):
         log_dir = "log"
@@ -115,9 +130,19 @@ class SFTTrainer(nn.Module):
             self.training_config.max_lr - self.training_config.min_lr
         )
 
-    def load_data(self) -> DataLoaderLite:
-        dataloader = DataLoaderLite(
-            self.sft_dataset.dataset,
+    def load_data(self) -> tuple[DataLoaderLite, DataLoaderLite]:
+        if self.sft_dataset.validation_dataset is None:
+            size = len(self.sft_dataset.training_dataset)
+            split_idx = int(size * 0.95)
+            self.sft_dataset.validation_dataset = (
+                self.sft_dataset.training_dataset.select(np.arange(split_idx + 1, size))
+            )
+            self.sft_dataset.training_dataset = (
+                self.sft_dataset.training_dataset.select(np.arange(0, split_idx))
+            )
+
+        train_dataloader = DataLoaderLite(
+            self.sft_dataset.training_dataset,
             self.encoder,
             max_length=self.training_config.sequence_length,
             batch_size=self.training_config.batch_size,
@@ -126,29 +151,104 @@ class SFTTrainer(nn.Module):
             process_rank=self.process_rank,
             num_processes=self.num_processes,
         )
-        return dataloader
+        val_dataloader = DataLoaderLite(
+            self.sft_dataset.validation_dataset,
+            self.encoder,
+            max_length=self.training_config.sequence_length,
+            batch_size=self.training_config.batch_size,
+            instruction_key=self.sft_dataset.instruction_key,
+            answer_key=self.sft_dataset.answer_key,
+            process_rank=self.process_rank,
+            num_processes=self.num_processes,
+        )
+        return train_dataloader, val_dataloader
 
-    def train_v1(self):
-        dataloader = self.load_data()
-        while True:
-            x, y = dataloader.next_batch()
-            if x is None or y is None:
-                break
-            x = x.to(torch.int64)
-            y = y.to(torch.int64)
-            self.optimizer.zero_grad()
-            y_pred, loss = self.model(x, targets=y)
-            print(loss)
-            loss.backward()
-            self.optimizer.step()
-            # self.scheduler.step()
+    def calculate_validation_loss(self, dataloader, step, last_step):
+        self.model.eval()
+        dataloader.reset()
+        with torch.no_grad():
+            val_loss_accum = 0.0
+            val_loss_steps = 20
+            for _ in range(val_loss_steps):
+                x, y = dataloader.next_batch()
+                x, y = (
+                    x.to(device, dtype=torch.long),
+                    y.to(device, dtype=torch.long),
+                )
+                if self.is_ddp_run:
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
+                        logits, loss = self.model(x, targets=y)
+                else:
+                    logits, loss = self.model(x, targets=y)
+                loss = loss / val_loss_steps
+                val_loss_accum += loss.detach()
+        if self.is_ddp_run:
+            dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+        if self.master_process:
+            print(f"validation loss: {val_loss_accum.item():.4f}")
+            with open("log/log.txt", "a") as f:
+                f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+            if step > 0 and (
+                step % self.training_config.checkpoint_steps == 0 or last_step
+            ):
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join("log", f"model_{step:05d}.pt")
+                checkpoint = {
+                    "model": self.raw_model.state_dict(),
+                    "step": step,
+                    "val_loss": val_loss_accum.item(),
+                }
+                torch.save(checkpoint, checkpoint_path)
+
+    def generate(self):
+        self.model.eval()
+        num_return_sequences = 4
+        max_length = 32
+        tokens = enc.encode("Calculate 2 + 2 = ")
+        tokens = torch.tensor(tokens, dtype=torch.long)
+        tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
+        xgen = tokens.to(self.device, dtype=torch.long)
+        sample_rng = torch.Generator(device=self.device)
+        sample_rng.manual_seed(42 + self.process_rank)
+        while xgen.size(1) < max_length:
+            # forward the model to get the logits
+            with torch.no_grad():
+                if self.is_ddp_run:
+                    with torch.autocast(
+                        device_type=self.device_type, dtype=torch.bfloat16
+                    ):
+                        logits, loss = self.model(xgen)  # (B, T, vocab_size)
+                else:
+                    logits, loss = self.model(xgen)  # (B, T, vocab_size)
+                # take the logits at the last position
+                logits = logits[:, -1, :]  # (B, vocab_size)
+                # get the probabilities
+                probs = F.softmax(logits, dim=-1)
+                # do top-k sampling of 50 (huggingface pipeline default)
+                # topk_probs here becomes (5, 50), topk_indices is (5, 50)
+                topk_probs, topk_indices = torch.topk(probs, 50, dim=-1)
+                # select a token from the top-k probabilities
+                # note: multinomial does not demand the input to sum to 1
+                ix = torch.multinomial(topk_probs, 1, generator=sample_rng)  # (B, 1)
+                # gather the corresponding indices
+                xcol = torch.gather(topk_indices, -1, ix)  # (B, 1)
+                # append to the sequence
+                xgen = torch.cat((xgen, xcol), dim=1)
+        # print the generated text
+        for i in range(num_return_sequences):
+            tokens = xgen[i, :max_length].tolist()
+            decoded = enc.decode(tokens)
+            print(f"rank {self.process_rank} sample {i}: {decoded}")
 
     def train(self):
-        dataloader = self.load_data()
+        dataloader, val_dataloader = self.load_data()
         for step in range(self.training_config.max_steps):
             t0 = time.time()
             last_step = step == self.training_config.max_steps - 1
-
+            if step % self.training_config.validation_steps == 0 or last_step:
+                self.calculate_validation_loss(val_dataloader, step, last_step)
+            if (step > 0 and step % 10 == 0) or last_step:
+                self.generate()
             # do one step of the optimization
             self.model.train()
             self.optimizer.zero_grad()
@@ -158,30 +258,33 @@ class SFTTrainer(nn.Module):
                 if x is None or y is None:
                     dataloader.reset()
                     x, y = dataloader.next_batch()
-                x, y = x.to(device), y.to(device)
+                x, y = x.to(device, dtype=torch.long), y.to(device, dtype=torch.long)
                 # added after video, this field is also used by the forward pass.
-
-                self.model.require_backward_grad_sync = (
-                    micro_step == self.grad_accum_steps - 1
-                )
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                if self.is_ddp_run:
+                    self.model.require_backward_grad_sync = (
+                        micro_step == self.grad_accum_steps - 1
+                    )
+                if self.is_ddp_run:
+                    with torch.autocast(
+                        device_type=self.device_type, dtype=torch.bfloat16
+                    ):
+                        logits, loss = self.model(x, targets=y)
+                else:
                     logits, loss = self.model(x, targets=y)
-                # we have to scale the loss to account for gradient accumulation,
-                # because the gradients just add on each successive backward().
-                # addition of gradients corresponds to a SUM in the objective, but
-                # instead of a SUM we want MEAN. Scale the loss here so it comes out right
                 loss = loss / self.grad_accum_steps
                 loss_accum += loss.detach()
                 loss.backward()
 
-            dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
+            if self.is_ddp_run:
+                dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
             norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             # determine and set the learning rate for this iteration
             lr = self.get_lr(step)
             for param_group in self.optimizer.param_groups:
                 param_group["lr"] = lr
             self.optimizer.step()
-            torch.cuda.synchronize()  # wait for the GPU to finish work
+            if self.device_type == "cuda":
+                torch.cuda.synchronize()  # wait for the GPU to finish work
             t1 = time.time()
             dt = t1 - t0  # time difference in seconds
             tokens_processed = (
@@ -199,10 +302,28 @@ class SFTTrainer(nn.Module):
                     f.write(f"{step} train {loss_accum.item():.6f}\n")
 
 
-ddp_rank = int(os.environ["RANK"])
-ddp_local_rank = int(os.environ["LOCAL_RANK"])
-ddp_world_size = int(os.environ["WORLD_SIZE"])
-device = f"cuda:{ddp_local_rank}"
+ddp_rank = int(os.getenv("RANK", -1))
+is_ddp_run = ddp_rank != -1
+if is_ddp_run:
+    init_process_group(backend="nccl")
+    print("Starting CUDA GPU run ...")
+    ddp_local_rank = int(os.environ["LOCAL_RANK"])
+    ddp_world_size = int(os.environ["WORLD_SIZE"])
+    device = f"cuda:{ddp_local_rank}"
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    torch.cuda.set_device(device)
+else:
+    print("Starting MPS GPU run ...")
+    ddp_rank = 0
+    ddp_local_rank = 0
+    ddp_world_size = 1
+    master_process = True
+    device = "cpu"
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = "mps"
+    device_type = "cuda" if device.startswith("cuda") else "mps"
+    print(f"using device: {device}")
+
 
 print("-----------------------------------------------------------------------------\n")
 print(
@@ -210,12 +331,11 @@ print(
 )
 print("-----------------------------------------------------------------------------\n")
 
-torch.cuda.set_device(device)
-init_process_group(backend="nccl")
-
 enc = get_tokenizer()
-ds = load_dataset("meta-math/MetaMathQA")
-sft_dataset = SFTDataset(dataset=ds, instruction_key="query", answer_key="response")
+ds = load_dataset("meta-math/MetaMathQA")["train"]
+sft_dataset = SFTDataset(
+    training_dataset=ds, instruction_key="query", answer_key="response"
+)
 training_config = TrainingConfig(batch_size=4, sequence_length=512)
 model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2").to(device)
 trainer = SFTTrainer(
@@ -224,9 +344,11 @@ trainer = SFTTrainer(
     sft_dataset=sft_dataset,
     training_config=training_config,
     device=device,
+    device_type=device_type,
     num_processes=ddp_world_size,
     process_rank=ddp_rank,
     ddp_local_rank=ddp_local_rank,
+    is_ddp_run=is_ddp_run,
 )
 print("-----------------------------------------------------------------------------\n")
 print("Training ....")
@@ -235,5 +357,6 @@ print("-------------------------------------------------------------------------
 
 print("-----------------------------------------------------------------------------\n")
 print("Destroying process group ....")
-destroy_process_group()
+if is_ddp_run:
+    destroy_process_group()
 print("-----------------------------------------------------------------------------\n")

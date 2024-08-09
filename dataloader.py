@@ -17,7 +17,7 @@ class DataLoaderLite:
         process_rank: int = 0,
         num_processes: int = 8,
     ):
-        self.dataset = dataset["train"]
+        self.dataset = dataset
         self.data = []
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -25,9 +25,7 @@ class DataLoaderLite:
         self.instruction_key = instruction_key
         self.answer_key = answer_key
         self.max_shard_size = int(1e6)
-        self.current_shard_start_index = 0
-        self.current_shard_token_index = 0
-        self.current_position = self.batch_size * self.max_length * process_rank
+
         self._eot = self.tokenizer._special_tokens["<|endoftext|>"]
         # self._eop = self.tokenizer._special_tokens["<|endofprompt|>"]
         self._eop = self.tokenizer._special_tokens["<|endoftext|>"]
@@ -35,9 +33,16 @@ class DataLoaderLite:
         self.process_rank = process_rank
         self.num_processes = num_processes
 
+        self.reset()
+
         # Shard the dataset
         self.get_shard()
         self.data = torch.tensor(self.data, dtype=torch.uint32)
+
+    def reset(self):
+        self.current_shard_start_index = 0
+        self.current_shard_token_index = 0
+        self.current_position = self.batch_size * self.max_length * self.process_rank
 
     def tokenize(self, row):
         # tokenizes a single document and returns a numpy array of uint16 tokens
@@ -81,21 +86,3 @@ class DataLoaderLite:
         if self.current_position + (B * T * self.num_processes + 1) > len(self.data):
             return None, None
         return x, y
-
-
-if __name__ == "__main__":
-    enc = get_tokenizer()
-    ds = load_dataset("openai/gsm8k", "main")
-    dataloader = OptimizedMathQuestionDataset(ds, enc, max_length=512)
-    import time
-
-    start = time.time()
-    i = 0
-    while True:
-        x, y = dataloader.next_batch()
-        if x is None:
-            break
-        i += 1
-    print(i)
-    print(time.time() - start)
-    print("Dataloader created")
