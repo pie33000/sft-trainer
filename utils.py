@@ -1,3 +1,5 @@
+import logging
+
 import tiktoken
 from tiktoken.core import Encoding
 
@@ -18,3 +20,35 @@ def get_tokenizer() -> Encoding:
         },
     )
     return enc
+
+
+def setup_logger(name, level=logging.INFO):
+    """
+    Sets up a logger with the specified name and log level.
+
+    Parameters:
+    - name (str): Name of the logger.
+    - level (int): Logging level (e.g., logging.INFO, logging.DEBUG).
+
+    Returns:
+    - logger (logging.Logger): Configured logger instance.
+    """
+    logger = logging.getLogger(name)
+    logger.setLevel(level)
+
+    # Check if the logger already has handlers configured (to avoid duplicate messages)
+    if not logger.hasHandlers():
+        # Create a console handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(level)
+
+        # Create a formatter and set it for the handler
+        formatter = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+        )
+        console_handler.setFormatter(formatter)
+
+        # Add the handler to the logger
+        logger.addHandler(console_handler)
+
+    return logger
