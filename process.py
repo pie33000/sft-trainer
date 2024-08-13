@@ -23,6 +23,8 @@ class DataProcessing:
         split: Literal["train", "validation"] = "train",
         shard_size: int | None = None,
         max_sequence_length: int = 256,
+        instruction_key="query",
+        answer_key="response",
         user_format: str = "### User:",
         assistant_format: str = "### Assistant:",
         output_name_dir: str = "gsm8k",
@@ -59,6 +61,8 @@ class DataProcessing:
         self.shard_size = self._calculate_shard_size(shard_size)
         logger.info("Shard size: %s", self.shard_size)
 
+        self.instruction_key = instruction_key
+        self.answer_key = answer_key
         self.user_format = user_format
         self.assistant_format = assistant_format
 
@@ -75,9 +79,11 @@ class DataProcessing:
     def tokenize(self, row) -> np.ndarray:
         eot = self.tokenizer._special_tokens["<|endofprompt|>"]
         tokens = self.tokenizer.encode_ordinary(self.user_format)
-        tokens.extend(self.tokenizer.encode_ordinary(" " + row["question"] + " "))
+        tokens.extend(
+            self.tokenizer.encode_ordinary(" " + row[self.instruction_key] + " ")
+        )
         tokens.extend(self.tokenizer.encode_ordinary(self.assistant_format))
-        tokens.extend(self.tokenizer.encode_ordinary(" " + row["answer"]))
+        tokens.extend(self.tokenizer.encode_ordinary(" " + row[self.answer_key]))
         tokens.extend([eot])
         tokens_np = np.array(tokens)
         assert (0 <= tokens_np).all() and (
@@ -113,13 +119,14 @@ class DataProcessing:
 
                 for tokens in pool.imap(self.tokenize, self.dataset, chunksize=16):
                     tokens = self._validate_max_sequence_length(tokens, eot)
-                    if row_count == shard_index:
+                    if row_count == self.shard_size:
                         self._write_datafile(
                             f"{self.root_filename}{shard_index:06d}",
                             arr_tokens_np[:row_count, :],
                         )
                         arr_tokens_np = self._create_np_array()
                         row_count = 0
+                        shard_index += 1
                     arr_tokens_np[row_count, :] = tokens
                     row_count += 1
                     pbar.update()
@@ -136,9 +143,9 @@ class DataProcessing:
 
 
 if __name__ == "__main__":
-    split = "train"
+    split = "validation"
     # dataset = load_dataset("openai/gsm8k", "main", split="train", streaming=True)
-    dataset = load_dataset("openai/gsm8k", "main", split="train")
+    dataset = load_dataset("imone/OpenOrca_FLAN", split="train", num_proc=8)
     enc = get_tokenizer()
 
     dp = DataProcessing(
@@ -146,6 +153,9 @@ if __name__ == "__main__":
         split=split,
         output_name_dir="gsm8k",
         tokenizer=enc,
+        instruction_key="instruction",
+        answer_key="response",
+        nprocs=14,
     )
     dp.process()
     print("Done!")
