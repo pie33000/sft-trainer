@@ -1,4 +1,3 @@
-import logging
 import multiprocessing as mp
 import os
 from math import log2
@@ -6,9 +5,9 @@ from typing import Literal
 
 import numpy as np
 import tiktoken
-from datasets import Dataset, IterableDataset, load_dataset
 from tqdm import tqdm
 
+from datasets import Dataset, IterableDataset, load_dataset
 from utils import get_tokenizer, setup_logger
 
 # Create or get a logger
@@ -29,6 +28,7 @@ class DataProcessing:
         assistant_format: str = "### Assistant:",
         output_name_dir: str = "gsm8k",
         nprocs: int = max(1, os.cpu_count() // 2),
+        mode: Literal["instruction", "json"] = "instruction",
     ):
         assert log2(
             max_sequence_length
@@ -52,11 +52,11 @@ class DataProcessing:
         self.max_sequence_length = max_sequence_length
 
         self.split = split
-
         self.output_name_dir = output_name_dir
-        os.makedirs(self.output_name_dir, exist_ok=True)
+        self.output_dir_path = os.path.join("datasets", self.output_name_dir)
+        os.makedirs(self.output_dir_path, exist_ok=True)
         self.root_filename = os.path.join(
-            self.output_name_dir, f"{self.output_name_dir}_{split}_"
+            self.output_dir_path, f"{self.output_name_dir}_{split}_"
         )
         self.shard_size = self._calculate_shard_size(shard_size)
         logger.info("Shard size: %s", self.shard_size)
@@ -77,14 +77,12 @@ class DataProcessing:
         return shard_size
 
     def tokenize(self, row) -> np.ndarray:
-        eot = self.tokenizer._special_tokens["<|endofprompt|>"]
         tokens = self.tokenizer.encode_ordinary(self.user_format)
         tokens.extend(
             self.tokenizer.encode_ordinary(" " + row[self.instruction_key] + " ")
         )
         tokens.extend(self.tokenizer.encode_ordinary(self.assistant_format))
         tokens.extend(self.tokenizer.encode_ordinary(" " + row[self.answer_key]))
-        tokens.extend([eot])
         tokens_np = np.array(tokens)
         assert (0 <= tokens_np).all() and (
             tokens_np < 2**16
@@ -143,15 +141,16 @@ class DataProcessing:
 
 
 if __name__ == "__main__":
-    split = "validation"
+    split = "train"
     # dataset = load_dataset("openai/gsm8k", "main", split="train", streaming=True)
-    dataset = load_dataset("imone/OpenOrca_FLAN", split="train", num_proc=8)
+    dataset = load_dataset("databricks/databricks-dolly-15k", split="train", num_proc=8)
     enc = get_tokenizer()
 
     dp = DataProcessing(
         dataset=dataset,
+        max_sequence_length=1024,
         split=split,
-        output_name_dir="gsm8k",
+        output_name_dir="databricks-dolly-15k",
         tokenizer=enc,
         instruction_key="instruction",
         answer_key="response",

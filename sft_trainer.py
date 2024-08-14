@@ -3,18 +3,10 @@ import os
 import time
 from dataclasses import dataclass
 
-import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from datasets import (
-    Dataset,
-    DatasetDict,
-    IterableDataset,
-    IterableDatasetDict,
-    load_dataset,
-)
 from tiktoken.core import Encoding
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -27,16 +19,16 @@ from utils import get_tokenizer
 # dataset to use
 # openai/gsm8k
 # meta-math/MetaMathQA
+# databricks-dolly-15k
+# https://huggingface.co/datasets/teknium/openhermes?row=25
+# https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k?row=9
 
 
 @dataclass
 class SFTDataset:
-    training_dataset: DatasetDict | Dataset | IterableDatasetDict | IterableDataset
-    instruction_key: str
-    answer_key: str
-    validation_dataset: (
-        DatasetDict | Dataset | IterableDatasetDict | IterableDataset | None
-    ) = None
+    dataset_folder: str
+    instruction_template: str
+    response_template: str
 
 
 @dataclass
@@ -45,7 +37,7 @@ class TrainingConfig:
     sequence_length: int
     min_lr: float = 6e-4 * 0.1
     max_lr: float = 6e-4
-    warmer_steps: int = 10
+    warmer_steps: int = 50
     max_steps: int = 500
     validation_steps: int = 10
     checkpoint_steps: int = 20
@@ -131,35 +123,28 @@ class SFTTrainer(nn.Module):
         )
 
     def load_data(self) -> tuple[DataLoaderLite, DataLoaderLite]:
-        if self.sft_dataset.validation_dataset is None:
-            size = len(self.sft_dataset.training_dataset)
-            split_idx = int(size * 0.95)
-            self.sft_dataset.validation_dataset = (
-                self.sft_dataset.training_dataset.select(np.arange(split_idx + 1, size))
-            )
-            self.sft_dataset.training_dataset = (
-                self.sft_dataset.training_dataset.select(np.arange(0, split_idx))
-            )
-
         train_dataloader = DataLoaderLite(
-            self.sft_dataset.training_dataset,
             self.encoder,
-            max_length=self.training_config.sequence_length,
             batch_size=self.training_config.batch_size,
-            instruction_key=self.sft_dataset.instruction_key,
-            answer_key=self.sft_dataset.answer_key,
+            data_folder=self.sft_dataset.dataset_folder,
             process_rank=self.process_rank,
             num_processes=self.num_processes,
+            split="train",
+            master_process=self.master_process,
+            instruction_template=self.sft_dataset.instruction_template,
+            response_template=self.sft_dataset.response_template,
         )
+        # improve the validation process (leakage)
         val_dataloader = DataLoaderLite(
-            self.sft_dataset.validation_dataset,
             self.encoder,
-            max_length=self.training_config.sequence_length,
-            batch_size=self.training_config.batch_size,
-            instruction_key=self.sft_dataset.instruction_key,
-            answer_key=self.sft_dataset.answer_key,
+            batch_size=1,
+            data_folder=self.sft_dataset.dataset_folder,
             process_rank=self.process_rank,
             num_processes=self.num_processes,
+            split="train",
+            master_process=self.master_process,
+            instruction_template=self.sft_dataset.instruction_template,
+            response_template=self.sft_dataset.response_template,
         )
         return train_dataloader, val_dataloader
 
@@ -170,14 +155,14 @@ class SFTTrainer(nn.Module):
             val_loss_accum = 0.0
             val_loss_steps = 20
             for _ in range(val_loss_steps):
-                x, y = dataloader.next_batch()
+                x, y, mask = dataloader.next_batch()
                 x, y = (
                     x.to(device, dtype=torch.long),
                     y.to(device, dtype=torch.long),
                 )
                 if self.is_ddp_run:
                     with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
-                        logits, loss = self.model(x, targets=y)
+                        logits, loss = self.model(x, targets=y, attention_mask=mask)
                 else:
                     logits, loss = self.model(x, targets=y)
                 loss = loss / val_loss_steps
@@ -204,7 +189,9 @@ class SFTTrainer(nn.Module):
         self.model.eval()
         num_return_sequences = 4
         max_length = 32
-        tokens = enc.encode("Calculate 2 + 2 = ")
+        tokens = enc.encode_ordinary(" " + self.sft_dataset.instruction_template + " ")
+        tokens.extend(enc.encode_ordinary("Who is Emmanuel Macron?"))
+        tokens.extend(enc.encode_ordinary(" " + self.sft_dataset.response_template))
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         xgen = tokens.to(self.device, dtype=torch.long)
@@ -254,11 +241,15 @@ class SFTTrainer(nn.Module):
             self.optimizer.zero_grad()
             loss_accum = 0.0
             for micro_step in range(self.grad_accum_steps):
-                x, y = dataloader.next_batch()
+                x, y, mask = dataloader.next_batch()
                 if x is None or y is None:
                     dataloader.reset()
-                    x, y = dataloader.next_batch()
-                x, y = x.to(device, dtype=torch.long), y.to(device, dtype=torch.long)
+                    x, y, mask = dataloader.next_batch()
+                x, y, mask = (
+                    x.to(device, dtype=torch.long),
+                    y.to(device, dtype=torch.long),
+                    mask.to(device, dtype=torch.long),
+                )
                 # added after video, this field is also used by the forward pass.
                 if self.is_ddp_run:
                     self.model.require_backward_grad_sync = (
@@ -268,9 +259,9 @@ class SFTTrainer(nn.Module):
                     with torch.autocast(
                         device_type=self.device_type, dtype=torch.bfloat16
                     ):
-                        logits, loss = self.model(x, targets=y)
+                        logits, loss = self.model(x, targets=y, attention_mask=mask)
                 else:
-                    logits, loss = self.model(x, targets=y)
+                    logits, loss = self.model(x, targets=y, attention_mask=mask)
                 loss = loss / self.grad_accum_steps
                 loss_accum += loss.detach()
                 loss.backward()
@@ -332,12 +323,14 @@ print(
 print("-----------------------------------------------------------------------------\n")
 
 enc = get_tokenizer()
-ds = load_dataset("meta-math/MetaMathQA")["train"]
 sft_dataset = SFTDataset(
-    training_dataset=ds, instruction_key="query", answer_key="response"
+    dataset_folder="datasets/databricks-dolly-15k",
+    instruction_template="### User:",
+    response_template="### Assistant:",
 )
-training_config = TrainingConfig(batch_size=4, sequence_length=512)
+training_config = TrainingConfig(batch_size=4, sequence_length=1024)
 model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2").to(device)
+# TO DO: set issue with padding put label to -100 and create a mask at 0
 trainer = SFTTrainer(
     model=model,
     encoder=enc,
