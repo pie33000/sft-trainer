@@ -81,19 +81,3 @@ def dynamic_model(model_class: Type[nn.Module], **kwargs) -> nn.Module:
         nn.Module: The instantiated model.
     """
     return WrappedModel(model_class, **kwargs)
-
-
-class SimpleNN(nn.Module):
-    """
-    A simple neural network model.
-    """
-
-    def __init__(self, input_size, hidden_size, output_size):
-        super().__init__()
-        self.layer1 = nn.Linear(input_size, hidden_size)
-        self.layer2 = nn.Linear(hidden_size, output_size)
-
-    def forward(self, x, targets=None):  # Removed the required targets argument
-        x = torch.relu(self.layer1(x))
-        x = self.layer2(x)
-        return x  # Removed the automatic loss calculation
