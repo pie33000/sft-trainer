@@ -1,9 +1,10 @@
 import inspect
-from typing import Type
+from typing import Optional, Type
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from transformers import GPT2LMHeadModel, GPT2Tokenizer
 
 
 class WrappedModel(nn.Module):
@@ -32,6 +33,54 @@ class WrappedModel(nn.Module):
                 targets.view(-1),
             )
         return logits, loss
+
+    @torch.no_grad()
+    def generate(
+        self,
+        x: torch.LongTensor,
+        max_length: int,
+        do_sampling: bool = True,
+        top_k: int = 50,
+        temperature: float = 1.0,
+        eos_token_id: int = 50256,
+        seed: Optional[int] = None,
+    ):
+        if x.dim() == 1:
+            x = x.unsqueeze(0)
+        generator = None
+        if seed is not None:
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+        for _ in range(max_length):
+            logits = self.model(x)
+            if hasattr(logits, "logits"):
+                logits = logits.logits
+            logits = logits[:, -1, :] / temperature
+            if do_sampling:
+                next_token_id = self.top_k_logits(logits, k=top_k, generator=generator)
+
+                if next_token_id == eos_token_id or x.size(-1) == max_length:
+                    break
+                x = torch.cat([x, next_token_id], dim=-1)
+            else:
+                raise NotImplementedError
+        return x
+
+    def top_k_logits(
+        self, logits: torch.FloatTensor, k: int = 50, generator=None
+    ) -> torch.FloatTensor:
+        # logits (d_model, vocab_size)
+        if k == 0:
+            return logits
+        top_k_logits, top_k_indices = torch.topk(logits, k, dim=-1)
+        probs = F.softmax(top_k_logits, dim=-1)
+
+        next_token = torch.multinomial(probs, num_samples=1, generator=generator)
+
+        # Get the corresponding token id
+        next_token_id = top_k_indices.gather(-1, next_token)
+
+        return next_token_id
 
     def configure_optimizers(
         self,
@@ -81,3 +130,20 @@ def dynamic_model(model_class: Type[nn.Module], **kwargs) -> nn.Module:
         nn.Module: The instantiated model.
     """
     return WrappedModel(model_class, **kwargs)
+
+
+tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+model = GPT2LMHeadModel.from_pretrained("gpt2")
+model = dynamic_model(model)
+
+tokens = tokenizer.encode("Who is Emmanuel Macron?")
+x = torch.tensor(tokens, dtype=torch.long)
+output = model.generate(
+    x,
+    max_length=100,
+    seed=42,
+    temperature=1,
+    top_k=50,
+    eos_token_id=tokenizer.eos_token_id,
+)
+print(tokenizer.decode(output.tolist()[0]))
