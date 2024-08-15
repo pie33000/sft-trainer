@@ -52,12 +52,14 @@ class DataProcessing:
         self.max_sequence_length = max_sequence_length
 
         self.split = split
+
         self.output_name_dir = output_name_dir
         self.output_dir_path = os.path.join("datasets", self.output_name_dir)
         os.makedirs(self.output_dir_path, exist_ok=True)
         self.root_filename = os.path.join(
             self.output_dir_path, f"{self.output_name_dir}_{split}_"
         )
+        
         self.shard_size = self._calculate_shard_size(shard_size)
         logger.info("Shard size: %s", self.shard_size)
 

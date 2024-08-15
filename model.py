@@ -1,10 +1,11 @@
 import inspect
 from typing import Optional, Type
 
+import tiktoken
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2LMHeadModel, GPT2Tokenizer
+from transformers import GPT2LMHeadModel
 
 
 class WrappedModel(nn.Module):
@@ -37,7 +38,7 @@ class WrappedModel(nn.Module):
     @torch.no_grad()
     def generate(
         self,
-        x: torch.LongTensor,
+        x: list | list[list[int]],
         max_length: int,
         do_sampling: bool = True,
         top_k: int = 50,
@@ -45,25 +46,71 @@ class WrappedModel(nn.Module):
         eos_token_id: int = 50256,
         seed: Optional[int] = None,
     ):
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
+        # TODO: Find a way to work with batch
+        # x = self.prepare_inputs(x, max_length, eos_token_id)
+        B = len(x)
         generator = None
         if seed is not None:
             generator = torch.Generator()
             generator.manual_seed(seed)
-        for _ in range(max_length):
-            logits = self.model(x)
-            if hasattr(logits, "logits"):
-                logits = logits.logits
-            logits = logits[:, -1, :] / temperature
-            if do_sampling:
-                next_token_id = self.top_k_logits(logits, k=top_k, generator=generator)
+        tensor_list = []
+        for idx in range(B):
+            x_it = torch.tensor(x[idx], dtype=torch.long).unsqueeze(0)
+            for _ in range(max_length):
+                logits = self.model(x_it)
+                if hasattr(logits, "logits"):
+                    logits = logits.logits
+                logits = logits[:, -1, :] / temperature
+                if do_sampling:
+                    next_token_id = self.top_k_logits(
+                        logits, k=top_k, generator=generator
+                    )
 
-                if next_token_id == eos_token_id or x.size(-1) == max_length:
-                    break
-                x = torch.cat([x, next_token_id], dim=-1)
-            else:
-                raise NotImplementedError
+                    if next_token_id == eos_token_id or x_it.size(-1) == max_length:
+                        break
+                    x_it = torch.cat([x_it, next_token_id], dim=-1)
+                else:
+                    raise NotImplementedError
+            if x_it.size(-1) < max_length:
+                x_it = torch.cat(
+                    [
+                        x_it,
+                        torch.tensor(
+                            [eos_token_id] * (max_length - x_it.size(-1))
+                        ).unsqueeze(0),
+                    ],
+                    dim=-1,
+                )
+            tensor_list.append(x_it)
+        return torch.stack(tensor_list, dim=1)
+
+    def prepare_inputs(
+        self, x: list[int] | list[list[int]], max_length: int, eos_token_id: int
+    ) -> torch.tensor:
+        max_sequence = len(max(x))
+        if max_sequence > max_length:
+            max_sequence = max_length
+        if len(x) == 1:
+            x = torch.tensor(x, dtype=torch.long)
+            x = x.unsqueeze(0)
+        else:
+            x = [
+                self.left_pad_batch_sequence(
+                    row, max_length=max_sequence, eos_token_id=eos_token_id
+                )
+                for row in x
+            ]
+            x = torch.tensor(x, dtype=torch.long)
+        return x
+
+    @staticmethod
+    def left_pad_batch_sequence(
+        x: list[int], max_length: int, eos_token_id: int
+    ) -> list[int]:
+        if len(x) < max_length:
+            x = [eos_token_id] * (max_length - len(x)) + x
+        else:
+            x = x[:max_length]
         return x
 
     def top_k_logits(
@@ -132,18 +179,19 @@ def dynamic_model(model_class: Type[nn.Module], **kwargs) -> nn.Module:
     return WrappedModel(model_class, **kwargs)
 
 
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
 model = dynamic_model(model)
 
-tokens = tokenizer.encode("Who is Emmanuel Macron?")
-x = torch.tensor(tokens, dtype=torch.long)
+tokens = enc.encode_batch(
+    ["Who is Emmanuel Macron?", "Explain to me the Brexit in the UK"]
+)
 output = model.generate(
-    x,
-    max_length=100,
+    x=tokens,
+    max_length=500,
     seed=42,
     temperature=1,
     top_k=50,
-    eos_token_id=tokenizer.eos_token_id,
+    eos_token_id=enc._special_tokens["<|endoftext|>"],
 )
-print(tokenizer.decode(output.tolist()[0]))
+print("hello")
