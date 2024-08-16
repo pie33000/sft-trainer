@@ -7,6 +7,10 @@ import torch.nn as nn
 import torch.nn.functional as F
 from transformers import GPT2LMHeadModel
 
+from utils import setup_logger
+
+logger = setup_logger(__name__)
+
 
 class WrappedModel(nn.Module):
     """
@@ -46,61 +50,66 @@ class WrappedModel(nn.Module):
         eos_token_id: int = 50256,
         seed: Optional[int] = None,
     ):
-        # TODO: Find a way to work with batch
-        # x = self.prepare_inputs(x, max_length, eos_token_id)
-        B = len(x)
+        x, mask = self.prepare_inputs(x, max_length, eos_token_id)
+        B, T = x.size()
         generator = None
         if seed is not None:
             generator = torch.Generator()
             generator.manual_seed(seed)
-        tensor_list = []
-        for idx in range(B):
-            x_it = torch.tensor(x[idx], dtype=torch.long).unsqueeze(0)
-            for _ in range(max_length):
-                logits = self.model(x_it)
-                if hasattr(logits, "logits"):
-                    logits = logits.logits
-                logits = logits[:, -1, :] / temperature
-                if do_sampling:
-                    next_token_id = self.top_k_logits(
-                        logits, k=top_k, generator=generator
-                    )
-
-                    if next_token_id == eos_token_id or x_it.size(-1) == max_length:
-                        break
-                    x_it = torch.cat([x_it, next_token_id], dim=-1)
-                else:
-                    raise NotImplementedError
-            if x_it.size(-1) < max_length:
-                x_it = torch.cat(
-                    [
-                        x_it,
-                        torch.tensor(
-                            [eos_token_id] * (max_length - x_it.size(-1))
-                        ).unsqueeze(0),
-                    ],
-                    dim=-1,
-                )
-            tensor_list.append(x_it)
-        return torch.stack(tensor_list, dim=1)
+        for _ in range(T, max_length):
+            logits = self.model(x)  # (B, seq_len, vocab_size)
+            if hasattr(logits, "logits"):
+                logits = logits.logits
+            logits = logits[:, -1, :] / temperature
+            if do_sampling:
+                next_token_id = self.top_k_logits(
+                    logits, k=top_k, generator=generator
+                )  # (B, 1)
+            else:
+                next_token_id = torch.argmax(logits, dim=-1)
+            x = torch.cat([x, next_token_id], dim=-1)
+        x = self.post_process_inputs(x, mask, eos_token_id)
+        return x
 
     def prepare_inputs(
         self, x: list[int] | list[list[int]], max_length: int, eos_token_id: int
-    ) -> torch.tensor:
-        max_sequence = len(max(x))
-        if max_sequence > max_length:
-            max_sequence = max_length
+    ) -> tuple[torch.LongTensor, torch.LongTensor]:
+        max_instruction_length = len(max(x))
+        if max_instruction_length > max_length:
+            max_instruction_length = max_length
+            logger.warning(
+                f"Instruction length {max_instruction_length} is longer than max sequence length {max_length}. ",
+                "Consider to increase the max sequence length.",
+            )
         if len(x) == 1:
+            # create a batch of size 1
             x = torch.tensor(x, dtype=torch.long)
             x = x.unsqueeze(0)
         else:
             x = [
                 self.left_pad_batch_sequence(
-                    row, max_length=max_sequence, eos_token_id=eos_token_id
+                    row, max_length=max_instruction_length, eos_token_id=eos_token_id
                 )
                 for row in x
             ]
             x = torch.tensor(x, dtype=torch.long)
+        mask = torch.ones(size=(len(x), max_length), dtype=torch.long)
+        mask[:, :max_instruction_length] = 0
+        return x, mask
+
+    def post_process_inputs(
+        self, x: torch.LongTensor, mask: torch.LongTensor, eos_token_id: int
+    ) -> torch.LongTensor:
+        B, T = x.size()
+        mask = x * mask
+        mask = torch.eq(mask, eos_token_id)
+        eos_token_positions = torch.argmax(mask.int(), dim=-1)
+        eos_token_positions[~mask.any(dim=1)] = (
+            T + 1
+        )  # set it to position out of the matrix shape
+        indices = torch.arange(T).expand(B, T)
+        mask_to_fill = indices >= eos_token_positions.unsqueeze(1)
+        x[mask_to_fill] = eos_token_id
         return x
 
     @staticmethod
@@ -188,7 +197,7 @@ tokens = enc.encode_batch(
 )
 output = model.generate(
     x=tokens,
-    max_length=500,
+    max_length=200,
     seed=42,
     temperature=1,
     top_k=50,
