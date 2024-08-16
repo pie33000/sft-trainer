@@ -49,7 +49,7 @@ class WrappedModel(nn.Module):
         temperature: float = 1.0,
         eos_token_id: int = 50256,
         seed: Optional[int] = None,
-    ):
+    ) -> tuple[torch.LongTensor, torch.FloatTensor]:
         x, mask = self.prepare_inputs(x, max_length, eos_token_id)
         B, T = x.size()
         generator = None
@@ -69,7 +69,7 @@ class WrappedModel(nn.Module):
                 next_token_id = torch.argmax(logits, dim=-1)
             x = torch.cat([x, next_token_id], dim=-1)
         x = self.post_process_inputs(x, mask, eos_token_id)
-        return x
+        return x, logits
 
     def prepare_inputs(
         self, x: list[int] | list[list[int]], max_length: int, eos_token_id: int

@@ -3,44 +3,103 @@ import torch
 from torchtune.modules.loss import DPOLoss
 
 from model import WrappedModel
+from utils import setup_logger
+
+logger = setup_logger(__name__)
 
 
 class DPOTrainer:
-    def __init__(self, model, ref_model, tokenizer, dataset) -> None:
-        self.model = model
-        self.ref_model = ref_model
+    def __init__(self, model, ref_model, tokenizer: tiktoken.Encoding, dataset) -> None:
+        self.device = "mps"
+
+        self.model = model.to(self.device)
+        self.ref_model = ref_model.to(self.device)
         self.tokenizer = tokenizer
         self.dataset = dataset
 
         self.loss = DPOLoss()
 
-    def train(self) -> None: ...
+    def train(self) -> None:
+        max_length = 256
+        do_sampling = True
+        top_k = 50
+        dataloader = ...
+        for x_choosen, x_rejected, y_choosen, y_rejected in dataloader.next_batch():
+            self.optimizer.zero_grad()
+            x_choosen, x_rejected = (
+                x_choosen.to(self.device),
+                x_rejected.to(self.device),
+            )
+            y_choosen, y_rejected = (
+                y_choosen.to(self.device),
+                y_rejected.to(self.device),
+            )
 
-    @staticmethod
-    def generate(
-        x: torch.LongTensor,
-        model: WrappedModel,
-        max_length: int,
-        do_sampling: bool = True,
-        top_k: int = 50,
-    ) -> torch.LongTensor:
-        # Create bacthing support and add padding token to be sure the generation have all the same size
-        x_generation = torch.zeros((x.shape[0], max_length), dtype=torch.long)
-        for idx, batch in enumerate(x):
-            # Generate the next token
-            tokens = model.generate(
-                x=batch,
+            y_pred_choosen, logits_choosen = self.generate(
+                x_choosen,
+                self.model,
                 max_length=max_length,
                 do_sampling=do_sampling,
                 top_k=top_k,
             )
-            if len(tokens) < max_length:
-                tokens = torch.cat(
-                    [tokens, torch.tensor([model.tokenizer.eot_token_id])],
-                    dim=-1,
-                )
-            x_generation[idx, :] = tokens
-        return x_generation
+            y_pred_choosen_ref, logits_choosen_ref = self.generate(
+                x_choosen,
+                self.ref_model,
+                max_length=max_length,
+                do_sampling=do_sampling,
+                top_k=top_k,
+            )
+            y_pred_rejected, logits_rejected = self.generate(
+                x_rejected,
+                self.model,
+                max_length=max_length,
+                do_sampling=do_sampling,
+                top_k=top_k,
+            )
+            y_pred_rejected_ref, logits_rejected_ref = self.generate(
+                x_rejected,
+                self.ref_model,
+                max_length=max_length,
+                do_sampling=do_sampling,
+                top_k=top_k,
+            )
+            log_probs_choosen = self.compute_log_probs(logits_choosen, y_choosen)
+            log_probs_rejected = self.compute_log_probs(logits_rejected, y_rejected)
+
+            log_probs_choosen_ref = self.compute_log_probs(
+                logits_choosen_ref, y_choosen
+            )
+            log_probs_rejected_ref = self.compute_log_probs(
+                logits_rejected_ref, y_rejected
+            )
+            loss, chosen_reward, rejected_reward = self.compute_loss(
+                policy_chosen_logps=log_probs_choosen,
+                policy_rejected_logps=log_probs_rejected,
+                reference_chosen_logps=log_probs_choosen_ref,
+                reference_rejected_logps=log_probs_rejected_ref,
+            )
+            reward_accuracy = (chosen_reward > rejected_reward).float()
+            logger.info(f"Reward accuracy: {reward_accuracy.item():05f}")
+
+            loss.backward()
+            self.optimizer.step()
+
+    def generate(
+        self,
+        x: list[list[int]],
+        model: WrappedModel,
+        max_length: int,
+        do_sampling: bool = True,
+        top_k: int = 50,
+    ) -> tuple[torch.LongTensor, torch.FloatTensor]:
+        x, logits = model.generate(
+            x,
+            max_length,
+            do_sampling,
+            top_k,
+            self.tokenizer._special_tokens["<|endoftext|>"],
+        )
+        return x, logits
 
     def compute_log_probs(
         self,
