@@ -1,11 +1,9 @@
 import inspect
 from typing import Optional, Type
 
-import tiktoken
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from transformers import GPT2LMHeadModel
 
 from utils import setup_logger
 
@@ -50,7 +48,7 @@ class WrappedModel(nn.Module):
         eos_token_id: int = 50256,
         seed: Optional[int] = None,
     ) -> tuple[torch.LongTensor, torch.FloatTensor]:
-        x, mask = self.prepare_inputs(x, max_length, eos_token_id)
+        x, mask = self.prepare_inputs(x, max_length)
         B, T = x.size()
         generator = None
         if seed is not None:
@@ -60,57 +58,49 @@ class WrappedModel(nn.Module):
             logits = self.model(x)  # (B, seq_len, vocab_size)
             if hasattr(logits, "logits"):
                 logits = logits.logits
-            logits = logits[:, -1, :] / temperature
             if do_sampling:
                 next_token_id = self.top_k_logits(
-                    logits, k=top_k, generator=generator
+                    logits[:, -1, :] / temperature, k=top_k, generator=generator
                 )  # (B, 1)
             else:
                 next_token_id = torch.argmax(logits, dim=-1)
             x = torch.cat([x, next_token_id], dim=-1)
-        x = self.post_process_inputs(x, mask, eos_token_id)
-        return x, logits
+        x, mask = self.post_process_inputs(x, mask, eos_token_id)
+        return x, logits, mask
 
     def prepare_inputs(
-        self, x: list[int] | list[list[int]], max_length: int, eos_token_id: int
+        self, x: torch.LongTensor | list[list[int]], max_length: int
     ) -> tuple[torch.LongTensor, torch.LongTensor]:
-        max_instruction_length = len(max(x))
+        max_instruction_length = x.shape[-1]
         if max_instruction_length > max_length:
             max_instruction_length = max_length
             logger.warning(
                 f"Instruction length {max_instruction_length} is longer than max sequence length {max_length}. ",
                 "Consider to increase the max sequence length.",
             )
-        if len(x) == 1:
+        if x.dim() == 1:
             # create a batch of size 1
             x = torch.tensor(x, dtype=torch.long)
             x = x.unsqueeze(0)
-        else:
-            x = [
-                self.left_pad_batch_sequence(
-                    row, max_length=max_instruction_length, eos_token_id=eos_token_id
-                )
-                for row in x
-            ]
-            x = torch.tensor(x, dtype=torch.long)
-        mask = torch.ones(size=(len(x), max_length), dtype=torch.long)
+        mask = torch.ones(size=(x.shape[0], max_length), dtype=torch.long)
         mask[:, :max_instruction_length] = 0
-        return x, mask
+        return x, mask.to(x.device)
 
     def post_process_inputs(
         self, x: torch.LongTensor, mask: torch.LongTensor, eos_token_id: int
     ) -> torch.LongTensor:
         B, T = x.size()
+        mask_copy = mask.clone()
         mask = x * mask
         mask = torch.eq(mask, eos_token_id)
         eos_token_positions = torch.argmax(mask.int(), dim=-1)
         eos_token_positions[~mask.any(dim=1)] = (
             T + 1
         )  # set it to position out of the matrix shape
-        indices = torch.arange(T).expand(B, T)
+        indices = torch.arange(T).expand(B, T).to(x.device)
         mask_to_fill = indices >= eos_token_positions.unsqueeze(1)
         x[mask_to_fill] = eos_token_id
-        return x
+        return x, mask_copy | mask_to_fill
 
     @staticmethod
     def left_pad_batch_sequence(
@@ -186,21 +176,3 @@ def dynamic_model(model_class: Type[nn.Module], **kwargs) -> nn.Module:
         nn.Module: The instantiated model.
     """
     return WrappedModel(model_class, **kwargs)
-
-
-enc = tiktoken.encoding_for_model("gpt2")
-model = GPT2LMHeadModel.from_pretrained("gpt2")
-model = dynamic_model(model)
-
-tokens = enc.encode_batch(
-    ["Who is Emmanuel Macron?", "Explain to me the Brexit in the UK"]
-)
-output = model.generate(
-    x=tokens,
-    max_length=200,
-    seed=42,
-    temperature=1,
-    top_k=50,
-    eos_token_id=enc._special_tokens["<|endoftext|>"],
-)
-print("hello")
