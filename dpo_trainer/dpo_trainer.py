@@ -316,7 +316,7 @@ device = os.getenv("DEVICE", "cuda")
 
 enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
-dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=64)
+dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=64, rank=rank,num_replicas=num_process)
 dataloader_test = create_dataloader(
     "Dahoas/full-hh-rlhf", enc, batch_size=16, split="test"
 )
