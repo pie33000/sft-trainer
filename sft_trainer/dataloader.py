@@ -4,7 +4,7 @@ import numpy as np
 import tiktoken
 import torch
 
-from utils import setup_logger
+from dpo_trainer.utils import setup_logger
 
 logger = setup_logger(__name__)
 

@@ -6,45 +6,63 @@ import tiktoken
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
+from utils import setup_logger
 
 from datasets import Dataset as HF_Dataset
 from datasets import load_dataset
-from utils import setup_logger
 
 logger = setup_logger(__name__)
 
+## TODO: Improve the package structure, validate the results, and test the code. Wtite documentation.
+## TODO: Add multi GPU support.
 
-# bug to fix with label and tokens ids size, how is it possible to have different sizes?
-def collate_fn(batch, max_sequence_length: int = 1024):
-    x, y = [], []
-    for i in range(len(batch)):
-        if len(batch[i]["chosen_ids"]) <= max_sequence_length:
-            batch[i]["chosen_ids"] += [50256] * (
-                max_sequence_length - len(batch[i]["chosen_ids"])
-            )
-            batch[i]["labels_chosen"] += [-100] * (
-                max_sequence_length - len(batch[i]["labels_chosen"])
-            )
-        else:
-            batch[i]["chosen_ids"] = batch[i]["chosen_ids"][:max_sequence_length]
-            batch[i]["labels_chosen"] = batch[i]["labels_chosen"][:max_sequence_length]
-        if len(batch[i]["rejected_ids"]) <= max_sequence_length:
-            batch[i]["rejected_ids"] += [50256] * (
-                max_sequence_length - len(batch[i]["rejected_ids"])
-            )
-            batch[i]["labels_rejected"] += [-100] * (
-                max_sequence_length - len(batch[i]["labels_rejected"])
-            )
-        else:
-            batch[i]["rejected_ids"] = batch[i]["rejected_ids"][:max_sequence_length]
-            batch[i]["labels_rejected"] = batch[i]["labels_rejected"][
-                :max_sequence_length
-            ]
-        x.append(batch[i]["chosen_ids"])
-        y.append(batch[i]["labels_chosen"])
-        x.append(batch[i]["rejected_ids"])
-        y.append(batch[i]["labels_rejected"])
-    return torch.tensor(x, dtype=torch.long), torch.tensor(y, dtype=torch.long)
+
+def pad_or_truncate(sequence, max_length, pad_value):
+    """
+    Pads the sequence to the max_length with pad_value or truncates it if necessary.
+    """
+    seq_len = len(sequence)
+    mask = [1] * seq_len
+    if seq_len < max_length:
+        return sequence + [pad_value] * (max_length - seq_len), mask + [0] * (
+            max_length - seq_len
+        )
+    else:
+        return sequence[:max_length], mask[:max_length]
+
+
+def collate_fn(batch, max_sequence_length: int = 1024, eos_token_id: int = 50256):
+    x, y, mask = [], [], []
+    for sample in batch:
+        max_sequence_length = min(
+            max_sequence_length,
+            max(len(sample["chosen_ids"]), len(sample["rejected_ids"])),
+        )
+
+    for sample in batch:
+        chosen_ids, mask_chosen = pad_or_truncate(
+            sample["chosen_ids"], max_sequence_length, eos_token_id
+        )
+        labels_chosen, _ = pad_or_truncate(
+            sample["labels_chosen"], max_sequence_length, -100
+        )
+
+        rejected_ids, mask_rejected = pad_or_truncate(
+            sample["rejected_ids"], max_sequence_length, eos_token_id
+        )
+        labels_rejected, _ = pad_or_truncate(
+            sample["labels_rejected"], max_sequence_length, -100
+        )
+
+        x.extend([chosen_ids, rejected_ids])
+        mask.extend([mask_chosen, mask_rejected])
+        y.extend([labels_chosen, labels_rejected])
+
+    return (
+        torch.tensor(x, dtype=torch.long),
+        torch.tensor(mask, dtype=torch.long),
+        torch.tensor(y, dtype=torch.long),
+    )
 
 
 @dataclass
@@ -109,7 +127,7 @@ def create_dataloader(
     split: Literal["train", "test", "validation"] = "train",
     rank: int = 0,
     num_replicas: int = 1,
-    shuffle: bool = True,
+    shuffle: bool = False,
     columns_mapping: DPOColumnsMapping = DPOColumnsMapping(
         "prompt", "chosen", "rejected"
     ),

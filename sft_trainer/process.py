@@ -8,7 +8,7 @@ import tiktoken
 from tqdm import tqdm
 
 from datasets import Dataset, IterableDataset, load_dataset
-from utils import get_tokenizer, setup_logger
+from dpo_trainer.utils import get_tokenizer, setup_logger
 
 # Create or get a logger
 logger = setup_logger(__name__)

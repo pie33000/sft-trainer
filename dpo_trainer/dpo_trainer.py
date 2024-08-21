@@ -1,13 +1,14 @@
+import math
 from copy import deepcopy
 
 import tiktoken
 import torch
+from dataloader import create_dataloader
+from model import dynamic_model
 from torch.nn import CrossEntropyLoss
+from torch.optim.lr_scheduler import LinearLR
 from torchtune.modules.loss import DPOLoss
 from transformers import GPT2LMHeadModel
-
-from dpo_trainer.dataloader import create_dataloader
-from model import dynamic_model
 from utils import setup_logger
 
 logger = setup_logger(__name__)
@@ -32,21 +33,33 @@ class DPOTrainer:
         self.loss = DPOLoss()
         self.optimizer = self.model.configure_optimizers(
             weight_decay=0.01,
-            learning_rate=5e-5,
+            learning_rate=5e-4,
             device_type="mps",
             master_process=True,
         )
+        self.scheduler = LinearLR(
+            self.optimizer, start_factor=0.1, total_iters=len(dataloader)
+        )
 
     def train(self) -> None:
-        for x, y in self.dataloader:
-            x, y = x.to(self.device), y.to(self.device)
+        for step, batch in enumerate(self.dataloader):
+            x, mask, y = batch
+            x, mask, y = x.to(self.device), mask.to(self.device), y.to(self.device)
             self.optimizer.zero_grad()
             # keep only odd index in x and y to get chosen values
-            logits = self.model(x)[0]
+            logits = self.model(
+                x,
+                attention_mask=mask,
+                use_cache=False,
+            )[0]
             log_probs, _ = self.compute_log_probs(logits, y)
 
             with torch.no_grad():
-                logits_ref = self.ref_model(x)[0]
+                logits_ref = self.ref_model(
+                    x,
+                    attention_mask=mask,
+                    use_cache=False,
+                )[0]
                 log_probs_ref, _ = self.compute_log_probs(logits_ref, y)
 
             nll_loss = self.compute_chosen_cross_entropy(logits[0::2], y[0::2])
@@ -57,14 +70,20 @@ class DPOTrainer:
                 reference_chosen_logps=log_probs_ref[0::2].view(-1),
                 reference_rejected_logps=log_probs_ref[1::2].view(-1),
             )
-            loss = loss.sum()
-            reward_accuracy = (chosen_reward.sum() > rejected_reward.sum()).float()
-            logger.info(f"Reward accuracy: {reward_accuracy.item():05f}")
-            logger.info(f"Loss: {loss.item():05f}")
-            logger.info(f"Nll loss: {nll_loss.item():05f}")
+            loss = loss.mean()
+            reward_accuracy = (chosen_reward > rejected_reward).float().mean()
+            lr = self.optimizer.param_groups[0]["lr"]
+            if step % 10 == 0:
+                print(
+                    f"Step: {step} | Loss: {loss.item():05f} | Reward accuracy: {reward_accuracy.item():05f} | "
+                    f"chosen_reward/ratio {chosen_reward.mean().item():05f} | rejected_reward/ratio {rejected_reward.mean().item():05f} | "
+                    f"Logp_chosen: {log_probs[0::2].mean().item():05f} | Logp_rejected: {log_probs[1::2].mean().item():05f} | "
+                    f"NLL loss: {nll_loss.item():05f} | LR: {lr}"
+                )
 
             loss.backward()
             self.optimizer.step()
+            self.scheduler.step()
 
     def compute_chosen_cross_entropy(
         self, logits: torch.FloatTensor, labels: torch.LongTensor
@@ -127,6 +146,6 @@ class DPOTrainer:
 
 enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
-dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=2)
+dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=16)
 dpo_trainer = DPOTrainer(model, deepcopy(model), enc, dataloader)
 dpo_trainer.train()

@@ -13,8 +13,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForCausalLM
 
 from sft_trainer.dataloader import DataLoaderLite
-from model import dynamic_model
-from utils import get_tokenizer
+from dpo_trainer.model import dynamic_model
+from dpo_trainer.utils import get_tokenizer
 
 # dataset to use
 # openai/gsm8k
