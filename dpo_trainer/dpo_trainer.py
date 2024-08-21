@@ -1,5 +1,5 @@
-import math
 from copy import deepcopy
+from dataclasses import dataclass
 
 import tiktoken
 import torch
@@ -14,11 +14,59 @@ from utils import setup_logger
 logger = setup_logger(__name__)
 
 
+@dataclass
+class OptimizerCfg:
+    weight_decay: float = 0.01
+    learning_rate: float = 5e-4
+    device_type: str
+    master_process: bool
+
+
+@dataclass
+class DPOLossCfg:
+    beta: float = 0.1
+    label_smoothing: float = 0
+    loss_type: str = "sigmoid"
+
+
+@dataclass
+class TrainingCfg:
+    epochs: int = 10
+    step_log_training_loss: int = 10
+    step_log_eval_loss: int = 500
+    step_save_model: int = 5000
+
+
+@dataclass
+class DDPCfg:
+    master_process: bool = False
+    num_processes: int = 1
+    process_rank: int = 0
+
+
+@dataclass
+class DPOCfg:
+    optimizer_cfg: OptimizerCfg
+    dpo_loss_cfg: DPOLossCfg
+    training_cfg: TrainingCfg
+    ddp_cfg: DDPCfg
+
+
 class DPOTrainer:
     def __init__(
-        self, model, ref_model, tokenizer: tiktoken.Encoding, dataloader
+        self,
+        model,
+        ref_model,
+        tokenizer: tiktoken.Encoding,
+        dataloader,
+        dpo_cfg: DPOCfg,
+        device: str = "cpu",
     ) -> None:
-        self.device = "mps"
+        self.optimizer_cfg = dpo_cfg.optimizer_cfg
+        self.dpo_loss_cfg = dpo_cfg.dpo_loss_cfg
+        self.training_cfg = dpo_cfg.training_cfg
+        self.ddp_cfg = dpo_cfg.ddp_cfg
+        self.device = device
 
         self.model = dynamic_model(model).to(self.device)
         if ref_model is None:
@@ -30,15 +78,19 @@ class DPOTrainer:
         self.tokenizer = tokenizer
         self.dataloader = dataloader
 
-        self.loss = DPOLoss()
         self.optimizer = self.model.configure_optimizers(
-            weight_decay=0.01,
-            learning_rate=5e-4,
-            device_type="mps",
-            master_process=True,
+            weight_decay=self.optimizer_cfg.weight_decay,
+            learning_rate=self.optimizer_cfg.learning_rate,
+            device_type=self.device,
+            master_process=self.ddp_cfg.master_process,
         )
         self.scheduler = LinearLR(
             self.optimizer, start_factor=0.1, total_iters=len(dataloader)
+        )
+        self.loss = DPOLoss(
+            beta=self.dpo_loss_cfg.beta,
+            label_smoothing=self.dpo_loss_cfg.label_smoothing,
+            loss_type=self.dpo_loss_cfg.loss_type,
         )
 
     def train(self) -> None:
@@ -73,7 +125,7 @@ class DPOTrainer:
             loss = loss.mean()
             reward_accuracy = (chosen_reward > rejected_reward).float().mean()
             lr = self.optimizer.param_groups[0]["lr"]
-            if step % 10 == 0:
+            if step % self.training_cfg.step_log_training_loss == 0 and step != 0:
                 print(
                     f"Step: {step} | Loss: {loss.item():05f} | Reward accuracy: {reward_accuracy.item():05f} | "
                     f"chosen_reward/ratio {chosen_reward.mean().item():05f} | rejected_reward/ratio {rejected_reward.mean().item():05f} | "
@@ -90,11 +142,9 @@ class DPOTrainer:
     ) -> torch.FloatTensor:
         logits = logits[..., :-1, :].contiguous()
         labels = labels[..., 1:].contiguous()
-        # Flatten the tokens
         loss_fct = CrossEntropyLoss()
         logits = logits.view(-1, logits.shape[-1])
         labels = labels.view(-1)
-        # Enable model parallelism
         labels = labels.to(logits.device)
         loss = loss_fct(logits, labels)
         return loss
@@ -143,6 +193,12 @@ class DPOTrainer:
     def compute_metrics(self) -> None:
         raise NotImplementedError()
 
+
+# to do implement the new interface
+# improve the way to save logs/models
+# use ddp
+# implement the metrics
+# implement the evaluation
 
 enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
