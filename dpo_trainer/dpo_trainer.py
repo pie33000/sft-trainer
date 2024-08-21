@@ -172,10 +172,14 @@ class DPOTrainer:
                     * self.optimizer_cfg.accumulation_steps
                     / process_time
                 )
+                margin = abs(log_probs[0::2].mean().item())-abs(log_probs[1::2].mean().item())
+                margin_ref = abs(log_probs_ref[0::2].mean().item())-abs(log_probs_ref[1::2].mean().item())
                 print(
                     f"Step: {step} | Loss: {loss.item():05f} | Reward accuracy: {reward_accuracy.item():05f} | "
                     f"chosen_reward/ratio {chosen_reward.mean().item():05f} | rejected_reward/ratio {rejected_reward.mean().item():05f} | "
                     f"Logp_chosen: {log_probs[0::2].mean().item():05f} | Logp_rejected: {log_probs[1::2].mean().item():05f} | "
+                    f"Logp_chosen/ref: {log_probs_ref[0::2].mean().item():05f} | Logp_rejected/ref: {log_probs_ref[1::2].mean().item():05f} | "
+                    f"Margin: {margin:05f} | Margin/ref: {margin_ref:05f} | "
                     f"NLL loss: {nll_loss.item():05f} | LR: {lr} | raw/s : {raw_processed_per_s:.2f}"
                 )
                 self.save_logs(
@@ -184,7 +188,13 @@ class DPOTrainer:
                     reward_accuracy=reward_accuracy.item(),
                     logp_chosen=log_probs[0::2].mean().item(),
                     logp_rejected=log_probs[1::2].mean().item(),
+                    logp_chosen_ref=log_probs_ref[0::2].mean().item(),
+                    logp_rejected_ref=log_probs_ref[1::2].mean().item(),
+                    margin=margin,
+                    margin_ref=margin_ref,
                     nll_loss=nll_loss.item(),
+                    lr=lr,
+                    row_per_s=raw_processed_per_s
                 )
             if step % self.training_cfg.step_save_model == 0 and step != 0:
                 self.save_checkpoint(step, loss.item())
@@ -202,6 +212,7 @@ class DPOTrainer:
             if self.device_type == "cuda":
                 torch.cuda.synchronize()
 
+        self.save_checkpoint(step, loss.item())
         destroy_process_group()
 
     def compute_chosen_cross_entropy(
@@ -281,11 +292,19 @@ class DPOTrainer:
         reward_accuracy: float,
         logp_chosen: float,
         logp_rejected: float,
+        logp_chosen_ref: float,
+        logp_rejected_ref: float,
+        margin: float,
+        margin_ref: float,
         nll_loss: float,
+        lr: float,
+        row_per_s: float
     ) -> None:
         with open(os.path.join(self.training_cfg.log_path, "logs.txt"), "a") as f:
+            if step == 0:
+                f.write("step; loss; reward_accuracy; logp_chosen; logp_rejected; logp_chosen/ref; logp_rejected/ref; margin; margin/ref; nll_loss; lr; row/s\n")
             f.write(
-                f"{step}; {loss}; {reward_accuracy}; {logp_chosen}; {logp_rejected}; {nll_loss}\n"
+                f"{step}; {loss}; {reward_accuracy}; {logp_chosen}; {logp_rejected}; {logp_chosen_ref}; {logp_rejected_ref}; {margin}; {margin_ref}; {nll_loss}; {lr}; {row_per_s}\n"
             )
 
 
@@ -297,7 +316,7 @@ device = os.getenv("DEVICE", "cuda")
 
 enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
-dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=16)
+dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=64)
 dataloader_test = create_dataloader(
     "Dahoas/full-hh-rlhf", enc, batch_size=16, split="test"
 )
