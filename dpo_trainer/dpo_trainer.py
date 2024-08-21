@@ -161,7 +161,11 @@ class DPOTrainer:
 
             reward_accuracy = (chosen_reward > rejected_reward).float().mean()
             lr = self.optimizer.param_groups[0]["lr"]
-            if step % self.training_cfg.step_log_training_loss == 0 and step != 0:
+            if (
+                step % self.training_cfg.step_log_training_loss == 0
+                and step != 0
+                and self.ddp_cfg.master_process
+            ):
                 process_time = time.time() - t0
                 raw_processed_per_s = (
                     self.dataloader.batch_size
