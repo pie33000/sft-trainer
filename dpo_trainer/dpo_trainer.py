@@ -1,8 +1,10 @@
+import os
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import tiktoken
 import torch
+import torch.distributed as dist
 from dataloader import create_dataloader
 from model import dynamic_model
 from torch.nn import CrossEntropyLoss
@@ -18,8 +20,7 @@ logger = setup_logger(__name__)
 class OptimizerCfg:
     weight_decay: float = 0.01
     learning_rate: float = 5e-4
-    device_type: str
-    master_process: bool
+    accumulation_steps: int = 10
 
 
 @dataclass
@@ -32,24 +33,26 @@ class DPOLossCfg:
 @dataclass
 class TrainingCfg:
     epochs: int = 10
+    log_path: str = "logs"
     step_log_training_loss: int = 10
     step_log_eval_loss: int = 500
     step_save_model: int = 5000
+    checkpoint_path: str = "checkpoints"
 
 
 @dataclass
 class DDPCfg:
-    master_process: bool = False
+    master_process: bool = True
     num_processes: int = 1
     process_rank: int = 0
 
 
 @dataclass
 class DPOCfg:
-    optimizer_cfg: OptimizerCfg
-    dpo_loss_cfg: DPOLossCfg
-    training_cfg: TrainingCfg
-    ddp_cfg: DDPCfg
+    optimizer_cfg: OptimizerCfg = field(default_factory=OptimizerCfg)
+    dpo_loss_cfg: DPOLossCfg = field(default_factory=DPOLossCfg)
+    training_cfg: TrainingCfg = field(default_factory=TrainingCfg)
+    ddp_cfg: DDPCfg = field(default_factory=DDPCfg)
 
 
 class DPOTrainer:
@@ -61,12 +64,19 @@ class DPOTrainer:
         dataloader,
         dpo_cfg: DPOCfg,
         device: str = "cpu",
+        val_dataloader=None,
     ) -> None:
         self.optimizer_cfg = dpo_cfg.optimizer_cfg
         self.dpo_loss_cfg = dpo_cfg.dpo_loss_cfg
         self.training_cfg = dpo_cfg.training_cfg
         self.ddp_cfg = dpo_cfg.ddp_cfg
-        self.device = device
+        self.device = (
+            device if device == "cpu" else f"{device}:{self.ddp_cfg.process_rank}"
+        )
+        self.device_type = "cuda" if self.device.startswith("cuda") else "cpu"
+
+        os.makedirs(self.training_cfg.checkpoint_path, exist_ok=True)
+        os.makedirs(self.training_cfg.log_path, exist_ok=True)
 
         self.model = dynamic_model(model).to(self.device)
         if ref_model is None:
@@ -77,6 +87,7 @@ class DPOTrainer:
         self.ref_model = dynamic_model(ref_model).to(self.device)
         self.tokenizer = tokenizer
         self.dataloader = dataloader
+        self.val_dataloader = val_dataloader
 
         self.optimizer = self.model.configure_optimizers(
             weight_decay=self.optimizer_cfg.weight_decay,
@@ -94,28 +105,44 @@ class DPOTrainer:
         )
 
     def train(self) -> None:
+        loss_accum = 0
         for step, batch in enumerate(self.dataloader):
             x, mask, y = batch
             x, mask, y = x.to(self.device), mask.to(self.device), y.to(self.device)
             self.optimizer.zero_grad()
             # keep only odd index in x and y to get chosen values
-            logits = self.model(
-                x,
-                attention_mask=mask,
-                use_cache=False,
-            )[0]
-            log_probs, _ = self.compute_log_probs(logits, y)
-
-            with torch.no_grad():
-                logits_ref = self.ref_model(
+            self.model.train()
+            if self.ddp_cfg.num_processes > 1:
+                self.model.require_backward_grad_sync = (
+                    step % self.optimizer_cfg.accumulation_steps == 0 and step != 0
+                )
+                with torch.autocast(device_type=self.device_type, dtype=torch.bfloat16):
+                    logits = self.model(
+                        x,
+                        attention_mask=mask,
+                        use_cache=False,
+                    )[0]
+                    with torch.no_grad():
+                        logits_ref = self.ref_model(
+                            x,
+                            attention_mask=mask,
+                            use_cache=False,
+                        )[0]
+            else:
+                logits = logits = self.model(
                     x,
                     attention_mask=mask,
                     use_cache=False,
                 )[0]
-                log_probs_ref, _ = self.compute_log_probs(logits_ref, y)
-
+                with torch.no_grad():
+                    logits_ref = self.ref_model(
+                        x,
+                        attention_mask=mask,
+                        use_cache=False,
+                    )[0]
+            log_probs, _ = self.compute_log_probs(logits, y)
+            log_probs_ref, _ = self.compute_log_probs(logits_ref, y)
             nll_loss = self.compute_chosen_cross_entropy(logits[0::2], y[0::2])
-
             loss, chosen_reward, rejected_reward = self.compute_loss(
                 policy_chosen_logps=log_probs[0::2].view(-1),
                 policy_rejected_logps=log_probs[1::2].view(-1),
@@ -123,6 +150,7 @@ class DPOTrainer:
                 reference_rejected_logps=log_probs_ref[1::2].view(-1),
             )
             loss = loss.mean()
+
             reward_accuracy = (chosen_reward > rejected_reward).float().mean()
             lr = self.optimizer.param_groups[0]["lr"]
             if step % self.training_cfg.step_log_training_loss == 0 and step != 0:
@@ -132,10 +160,29 @@ class DPOTrainer:
                     f"Logp_chosen: {log_probs[0::2].mean().item():05f} | Logp_rejected: {log_probs[1::2].mean().item():05f} | "
                     f"NLL loss: {nll_loss.item():05f} | LR: {lr}"
                 )
+                self.save_logs(
+                    step=step,
+                    loss=loss.item(),
+                    reward_accuracy=reward_accuracy.item(),
+                    logp_chosen=log_probs[0::2].mean().item(),
+                    logp_rejected=log_probs[1::2].mean().item(),
+                    nll_loss=nll_loss.item(),
+                )
+            if step % self.training_cfg.step_save_model == 0 and step != 0:
+                self.save_checkpoint(step, loss.item())
 
+            loss = loss
+            loss_accum += loss.detach()
             loss.backward()
-            self.optimizer.step()
             self.scheduler.step()
+
+            if self.ddp_cfg.num_processes > 1:
+                dist.all_reduce(
+                    loss_accum / self.optimizer_cfg.accumulation_steps,
+                    op=dist.ReduceOp.AVG,
+                )
+            if self.device_type == "cuda":
+                torch.cuda.synchronize()
 
     def compute_chosen_cross_entropy(
         self, logits: torch.FloatTensor, labels: torch.LongTensor
@@ -193,15 +240,44 @@ class DPOTrainer:
     def compute_metrics(self) -> None:
         raise NotImplementedError()
 
+    def compute_validation_loss(self):
+        raise NotImplementedError()
 
-# to do implement the new interface
-# improve the way to save logs/models
-# use ddp
-# implement the metrics
+    def save_checkpoint(self, step: int, loss: float) -> None:
+        torch.save(
+            {
+                "step": step,
+                "model_state_dict": self.model.state_dict(),
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "loss": loss,
+            },
+            os.path.join(self.training_cfg.checkpoint_path, f"checkpoint_{step}.pt"),
+        )
+
+    def save_logs(
+        self,
+        step,
+        loss: float,
+        reward_accuracy: float,
+        logp_chosen: float,
+        logp_rejected: float,
+        nll_loss: float,
+    ) -> None:
+        with open(os.path.join(self.training_cfg.log_path, "logs.txt"), "a") as f:
+            f.write(
+                f"{step}; {loss}; {reward_accuracy}; {logp_chosen}; {logp_rejected}; {nll_loss}\n"
+            )
+
+
+# Test ddp with 2 Nvidia GPUs and Cuda
 # implement the evaluation
 
 enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
 dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=16)
-dpo_trainer = DPOTrainer(model, deepcopy(model), enc, dataloader)
+dataloader_test = create_dataloader(
+    "Dahoas/full-hh-rlhf", enc, batch_size=16, split="test"
+)
+dpocfg = DPOCfg()
+dpo_trainer = DPOTrainer(model, deepcopy(model), enc, dataloader, dpocfg, device="mps")
 dpo_trainer.train()

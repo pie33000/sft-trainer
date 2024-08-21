@@ -12,9 +12,9 @@ from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoModelForCausalLM
 
-from sft_trainer.dataloader import DataLoaderLite
 from dpo_trainer.model import dynamic_model
 from dpo_trainer.utils import get_tokenizer
+from sft_trainer.dataloader import DataLoaderLite
 
 # dataset to use
 # openai/gsm8k
@@ -250,7 +250,6 @@ class SFTTrainer(nn.Module):
                     y.to(device, dtype=torch.long),
                     mask.to(device, dtype=torch.long),
                 )
-                # added after video, this field is also used by the forward pass.
                 if self.is_ddp_run:
                     self.model.require_backward_grad_sync = (
                         micro_step == self.grad_accum_steps - 1
