@@ -301,7 +301,7 @@ class DPOTrainer:
         row_per_s: float
     ) -> None:
         with open(os.path.join(self.training_cfg.log_path, "logs.txt"), "a") as f:
-            if step == 0:
+            if step - self.training_cfg.step_log_training_loss == 0:
                 f.write("step; loss; reward_accuracy; logp_chosen; logp_rejected; logp_chosen/ref; logp_rejected/ref; margin; margin/ref; nll_loss; lr; row/s\n")
             f.write(
                 f"{step}; {loss}; {reward_accuracy}; {logp_chosen}; {logp_rejected}; {logp_chosen_ref}; {logp_rejected_ref}; {margin}; {margin_ref}; {nll_loss}; {lr}; {row_per_s}\n"
