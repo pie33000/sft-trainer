@@ -1,4 +1,5 @@
 import os
+import time
 from copy import deepcopy
 from dataclasses import dataclass, field
 
@@ -7,6 +8,7 @@ import torch
 import torch.distributed as dist
 from dataloader import create_dataloader
 from model import dynamic_model
+from torch.distributed import destroy_process_group, init_process_group
 from torch.nn import CrossEntropyLoss
 from torch.optim.lr_scheduler import LinearLR
 from torchtune.modules.loss import DPOLoss
@@ -75,6 +77,11 @@ class DPOTrainer:
         )
         self.device_type = "cuda" if self.device.startswith("cuda") else "cpu"
 
+        if self.ddp_cfg.num_processes > 1 and self.device_type == "cuda":
+            self.ddp_cfg.master_process = self.ddp_cfg.process_rank == 0
+            init_process_group(backend="nccl")
+            torch.cuda.set_device(self.device)
+
         os.makedirs(self.training_cfg.checkpoint_path, exist_ok=True)
         os.makedirs(self.training_cfg.log_path, exist_ok=True)
 
@@ -107,6 +114,7 @@ class DPOTrainer:
     def train(self) -> None:
         loss_accum = 0
         for step, batch in enumerate(self.dataloader):
+            t0 = time.time()
             x, mask, y = batch
             x, mask, y = x.to(self.device), mask.to(self.device), y.to(self.device)
             self.optimizer.zero_grad()
@@ -154,11 +162,17 @@ class DPOTrainer:
             reward_accuracy = (chosen_reward > rejected_reward).float().mean()
             lr = self.optimizer.param_groups[0]["lr"]
             if step % self.training_cfg.step_log_training_loss == 0 and step != 0:
+                process_time = time.time() - t0
+                raw_processed_per_s = (
+                    self.dataloader.batch_size
+                    * self.optimizer_cfg.accumulation_steps
+                    / process_time
+                )
                 print(
                     f"Step: {step} | Loss: {loss.item():05f} | Reward accuracy: {reward_accuracy.item():05f} | "
                     f"chosen_reward/ratio {chosen_reward.mean().item():05f} | rejected_reward/ratio {rejected_reward.mean().item():05f} | "
                     f"Logp_chosen: {log_probs[0::2].mean().item():05f} | Logp_rejected: {log_probs[1::2].mean().item():05f} | "
-                    f"NLL loss: {nll_loss.item():05f} | LR: {lr}"
+                    f"NLL loss: {nll_loss.item():05f} | LR: {lr} | raw/s : {raw_processed_per_s:.2f}"
                 )
                 self.save_logs(
                     step=step,
@@ -183,6 +197,8 @@ class DPOTrainer:
                 )
             if self.device_type == "cuda":
                 torch.cuda.synchronize()
+
+        destroy_process_group()
 
     def compute_chosen_cross_entropy(
         self, logits: torch.FloatTensor, labels: torch.LongTensor
@@ -271,6 +287,9 @@ class DPOTrainer:
 
 # Test ddp with 2 Nvidia GPUs and Cuda
 # implement the evaluation
+rank = int(os.getenv("LOCAL_RANK", 0))
+num_process = int(os.getenv("WORLD_SIZE", 1))
+device = os.getenv("DEVICE", "cuda")
 
 enc = tiktoken.encoding_for_model("gpt2")
 model = GPT2LMHeadModel.from_pretrained("gpt2")
@@ -278,6 +297,7 @@ dataloader = create_dataloader("Dahoas/full-hh-rlhf", enc, batch_size=16)
 dataloader_test = create_dataloader(
     "Dahoas/full-hh-rlhf", enc, batch_size=16, split="test"
 )
-dpocfg = DPOCfg()
-dpo_trainer = DPOTrainer(model, deepcopy(model), enc, dataloader, dpocfg, device="mps")
+dpocfg = DPOCfg(ddp_cfg=DDPCfg(num_processes=num_process, process_rank=rank))
+dpo_trainer = DPOTrainer(model, deepcopy(model), enc, dataloader, dpocfg, device=device)
 dpo_trainer.train()
+# torchrun --standalone --nproc_per_node=2 dpo_trainer/dpo_trainer.py

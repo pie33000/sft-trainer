@@ -1,4 +1,5 @@
+datasets==2.20.0
 tiktoken==0.7.0
 torch==2.2.0
-datasets==2.20.0
+torchtune
 transformers==4.44.0
