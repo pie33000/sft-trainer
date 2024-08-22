@@ -4,7 +4,8 @@ from typing import Optional, Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from utils import setup_logger
+
+from shared.utils import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -25,11 +26,15 @@ class WrappedModel(nn.Module):
 
     def forward(self, *args, **kwargs):
         targets = kwargs.pop("targets", None)
+        shift_labels = kwargs.pop("shift_labels", False)
         logits = self.model(*args, **kwargs)
         if hasattr(logits, "logits"):
             logits = logits.logits
         loss = None
         if targets is not None:
+            if shift_labels:
+                logits = logits[:, :-1, :].contiguous()
+                targets = targets[:, 1:].contiguous()
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
                 targets.view(-1),

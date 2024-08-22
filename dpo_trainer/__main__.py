@@ -4,7 +4,7 @@ from transformers import GPT2LMHeadModel
 from dpo_trainer.config import DPOConfig
 from dpo_trainer.dataloader import create_dataloader
 from dpo_trainer.trainer import DPOTrainer
-from dpo_trainer.utils import get_tokenizer
+from shared.utils import get_tokenizer
 
 if __name__ == "__main__":
     model_name = "gpt2"

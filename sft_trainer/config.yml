@@ -1,0 +1,25 @@
+optimizer_config:
+  weight_decay: 0.01
+  learning_rate: 0.0005
+  min_lr: 6e-5
+  max_lr: 6e-4
+  warmup_steps: 50
+  accumulation_steps: 10
+
+training_config:
+  max_steps: 20000
+  batch_size: 8
+  epochs: 10
+  sequence_length: 1024
+  log_path: logs
+  step_log_training_loss: 10
+  step_log_eval_loss: 50
+  step_save_model: 5000
+  checkpoint_path: checkpoints
+
+ddp_config:
+  master_process: true
+  num_processes: 1
+  process_rank: 0
+
+device: mps
