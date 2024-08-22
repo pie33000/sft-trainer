@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from functools import partial
 from typing import Literal
@@ -12,9 +13,6 @@ from datasets import Dataset as HF_Dataset
 from datasets import load_dataset
 
 logger = setup_logger(__name__)
-
-## TODO: Improve the package structure, validate the results, and test the code. Wtite documentation.
-## TODO: Add multi GPU support.
 
 
 def pad_or_truncate(sequence, max_length, pad_value):
@@ -125,8 +123,6 @@ def create_dataloader(
     batch_size: int = 32,
     max_sequence_length: int = 1024,
     split: Literal["train", "test", "validation"] = "train",
-    rank: int = 0,
-    num_replicas: int = 1,
     shuffle: bool = False,
     columns_mapping: DPOColumnsMapping = DPOColumnsMapping(
         "prompt", "chosen", "rejected"
@@ -140,8 +136,8 @@ def create_dataloader(
     dataset = HuggingFaceDataset(ds, tokenizer, columns_mapping)
     sampler = DistributedSampler(
         dataset=dataset,
-        num_replicas=num_replicas,
-        rank=rank,
+        num_replicas=int(os.getenv("WORLD_SIZE", 1)),
+        rank=int(os.getenv("LOCAL_RANK", 0)),
         shuffle=shuffle,
         drop_last=True,
     )

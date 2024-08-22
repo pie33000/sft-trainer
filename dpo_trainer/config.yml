@@ -1,0 +1,25 @@
+optimizer_config:
+  weight_decay: 0.01
+  learning_rate: 0.0005
+  accumulation_steps: 10
+
+dpo_loss_config:
+  beta: 0.1
+  label_smoothing: 0.0
+  loss_type: sigmoid
+
+training_config:
+  batch_size: 8
+  epochs: 10
+  log_path: logs
+  step_log_training_loss: 10
+  step_log_eval_loss: 500
+  step_save_model: 5000
+  checkpoint_path: checkpoints
+
+ddp_config:
+  master_process: true
+  num_processes: 1
+  process_rank: 0
+
+device: mps

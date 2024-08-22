@@ -3,3 +3,7 @@ __pycache__/
 log/*
 *.ipynb
 datasets/*
+build/*
+fine_tuning_llm.egg-info/*
+logs/*
+checkpoints/*

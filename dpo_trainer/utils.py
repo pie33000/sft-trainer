@@ -4,12 +4,10 @@ import tiktoken
 from tiktoken.core import Encoding
 
 
-def get_tokenizer() -> Encoding:
-    enc = tiktoken.get_encoding("gpt2")
+def get_tokenizer(model_name: str) -> Encoding:
+    enc = tiktoken.get_encoding(model_name)
 
     enc = tiktoken.Encoding(
-        # If you're changing the set of special tokens, make sure to use a different name
-        # It should be clear from the name what behaviour to expect.
         name="enc_sft",
         pat_str=enc._pat_str,
         mergeable_ranks=enc._mergeable_ranks,
