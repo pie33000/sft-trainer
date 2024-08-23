@@ -10,7 +10,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from datasets import Dataset as HF_Dataset
 from datasets import load_dataset
-from shared.utils import get_tokenizer, setup_logger
+from shared.utils import setup_logger
 
 logger = setup_logger(__name__)
 
