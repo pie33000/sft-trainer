@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import tiktoken
 import torch
 import torch.distributed as dist
+from safetensors.torch import save_model
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import upload_file
@@ -177,7 +178,7 @@ class SFTTrainer(nn.Module):
         num_return_sequences = 4
         max_length = 32
         tokens = self.dataloader.dataset.instruction_ids
-        tokens.extend(self.encoder.encode_ordinary("Who is Emmanuel Macron?\n "))
+        tokens.extend(self.encoder.encode_ordinary("Who is Emmanuel Macron?"))
         tokens.extend(self.dataloader.dataset.answer_ids)
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
@@ -259,19 +260,18 @@ class SFTTrainer(nn.Module):
                 and self.config.ddp_config.master_process
             ):
                 # optionally write model checkpoints
-                checkpoint_path = os.path.join(
-                    self.config.training_config.checkpoint_path, f"model_{step:05d}.pt"
-                )
+                checkpoint_path = os.path.join(self.config.training_config.checkpoint_path, "model.safetensors")
                 checkpoint = {
-                    "model": self.raw_model.state_dict(),
+                    "model": self.raw_model.model.state_dict(),
                     "step": step,
                     "val_loss": loss_accum.item(),
                 }
-                torch.save(checkpoint, checkpoint_path)
+                #torch.save(self.raw_model.model.state_dict(), checkpoint_path)
+                save_model(self.raw_model.model, checkpoint_path)
                 if self.config.training_config.push_to_hub:
                     upload_file(
                         path_or_fileobj=checkpoint_path,
-                        path_in_repo="model.pt",
+                        path_in_repo="model.safetensors",
                         repo_id="Pie33000/gpt2-sft-trainer",
                         token=os.getenv("HF_HUB_TOKEN"),
                         commit_message=f"Training step - {step}",
@@ -280,11 +280,11 @@ class SFTTrainer(nn.Module):
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-                self.scheduler.step()
-                lr = self.optimizer.param_groups[0]["lr"]
-                # lr = self.get_lr(step)
-                """for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = lr"""
+                #self.scheduler.step()
+                #lr = self.optimizer.param_groups[0]["lr"]
+                lr = self.get_lr(step)
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = lr
                 if self.device_type == "cuda":
                     torch.cuda.synchronize()
                 t1 = time.time()

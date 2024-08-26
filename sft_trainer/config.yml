@@ -1,9 +1,9 @@
 optimizer_config:
   weight_decay: 0.01
-  learning_rate: 0.0005
+  learning_rate: 0.00005
   min_lr: 6e-5
   max_lr: 6e-4
-  warmup_steps: 50
+  warmup_steps: 0
   accumulation_steps: 10
 
 training_config:
@@ -13,15 +13,15 @@ training_config:
   sequence_length: 1024
   log_path: logs
   step_log_training_loss: 10
-  step_log_eval_loss: 50
+  step_log_eval_loss: 500
   step_save_model: 500
   checkpoint_path: checkpoints
-  report_to_wandb: false
-  push_to_hub: false
+  report_to_wandb: true
+  push_to_hub: true
 
 ddp_config:
   master_process: true
   num_processes: 1
   process_rank: 0
 
-device: mps
+device: cuda
