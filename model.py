@@ -4,8 +4,7 @@ from typing import Optional, Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-from shared.utils import setup_logger
+from utils import setup_logger
 
 logger = setup_logger(__name__)
 

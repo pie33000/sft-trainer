@@ -7,7 +7,7 @@ import tiktoken
 import torch
 from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
-from shared.utils import setup_logger
+from utils import setup_logger
 
 from datasets import Dataset as HF_Dataset
 from datasets import load_dataset

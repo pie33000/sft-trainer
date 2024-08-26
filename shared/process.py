@@ -6,9 +6,9 @@ from typing import Literal
 import numpy as np
 import tiktoken
 from tqdm import tqdm
+from utils import get_tokenizer, setup_logger
 
 from datasets import Dataset, IterableDataset, load_dataset
-from shared.utils import get_tokenizer, setup_logger
 
 # Create or get a logger
 logger = setup_logger(__name__)
@@ -59,7 +59,7 @@ class DataProcessing:
         self.root_filename = os.path.join(
             self.output_dir_path, f"{self.output_name_dir}_{split}_"
         )
-        
+
         self.shard_size = self._calculate_shard_size(shard_size)
         logger.info("Shard size: %s", self.shard_size)
 

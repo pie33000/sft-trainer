@@ -10,7 +10,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from datasets import Dataset as HF_Dataset
 from datasets import load_dataset
-from shared.utils import setup_logger
+from utils import setup_logger
 
 logger = setup_logger(__name__)
 
@@ -30,10 +30,10 @@ def pad_or_truncate(sequence, attention_mask, max_length, pad_value):
 
 def collate_fn(batch, max_sequence_length: int = 1024, eos_token_id: int = 50256):
     x, y, mask = [], [], []
-    """max_batch_sequence = 0
+    max_batch_sequence = 0
     for sample in batch:
         max_batch_sequence = max(max_batch_sequence, len(sample["input_ids"]))
-    max_sequence_length = min(max_sequence_length, max_batch_sequence)"""
+    max_sequence_length = min(max_sequence_length, max_batch_sequence)
 
     for sample in batch:
         input_ids, mask_input_ids = pad_or_truncate(
@@ -42,7 +42,9 @@ def collate_fn(batch, max_sequence_length: int = 1024, eos_token_id: int = 50256
             max_sequence_length,
             eos_token_id,
         )
-        label_ids, _ = pad_or_truncate(sample["label_ids"], max_sequence_length, -100)
+        label_ids, _ = pad_or_truncate(
+            sample["label_ids"], sample["attention_mask"], max_sequence_length, -100
+        )
 
         x.extend([input_ids])
         mask.extend([mask_input_ids])
@@ -72,8 +74,8 @@ class HuggingFaceDataset(Dataset):
         self.tokenizer: tiktoken.Encoding = tokenizer
         self.prompt: str = column_mapping.prompt
         self.answer: str = column_mapping.answer
-        self.prompt_key: str = "Question: "
-        self.answer_key: str = "\n\nAnswer: "
+        self.prompt_key: str = "### Question: "
+        self.answer_key: str = "\n ### Answer: "
         self.instruction_ids: list[int] = self.tokenizer.encode_ordinary(
             self.prompt_key
         )
@@ -89,21 +91,14 @@ class HuggingFaceDataset(Dataset):
         labels = (
             len(self.instruction_ids + prompt_ids + self.answer_ids) * [-100]
             + label_ids
-            + [self.eos_token_id]
         )
-        input_ids = (
-            self.instruction_ids
-            + prompt_ids
-            + self.answer_ids
-            + label_ids
-            + [self.eos_token_id]
-        )
+        input_ids = self.instruction_ids + prompt_ids + self.answer_ids + label_ids
         return {
             "prompt": self.dataset[idx][self.prompt],
             "answer": self.dataset[idx][self.answer],
             "input_ids": input_ids,
             "label_ids": labels,
-            "attention_mask": [1] * len(input_ids) - 1 + [0],
+            "attention_mask": [1] * len(input_ids),
         }
 
 

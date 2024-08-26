@@ -7,13 +7,13 @@ import tiktoken
 import torch
 import torch.distributed as dist
 from config import DPOConfig
-from shared.model import dynamic_model
+from model import dynamic_model
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn import CrossEntropyLoss, Module
 from torch.optim.lr_scheduler import LinearLR
 from torch.utils.data import DataLoader
 from torchtune.modules.loss import DPOLoss
-from shared.utils import setup_logger
+from utils import setup_logger
 
 logger = setup_logger(__name__)
 

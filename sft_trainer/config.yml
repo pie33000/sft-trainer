@@ -8,7 +8,7 @@ optimizer_config:
 
 training_config:
   max_steps: 20000
-  batch_size: 4
+  batch_size: 16
   epochs: 10
   sequence_length: 1024
   log_path: logs
@@ -24,4 +24,4 @@ ddp_config:
   num_processes: 1
   process_rank: 0
 
-device: cuda
+device: mps

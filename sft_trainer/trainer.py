@@ -9,18 +9,15 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import upload_file
-from omegaconf import OmegaConf
 from tiktoken.core import Encoding
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
-from transformers import AutoModelForCausalLM
 
 import wandb
-from sft_trainer.config import SFTConfig
-from sft_trainer.dataloader import SFTColumnsMapping, create_dataloader
-from shared.model import dynamic_model
-from shared.utils import get_tokenizer
+from model import dynamic_model
+
+from .config import SFTConfig
 
 # dataset to use
 # openai/gsm8k
@@ -330,18 +327,3 @@ class SFTTrainer(nn.Module):
                 loss_accum = 0
         if self.config.ddp_config.num_processes > 1:
             destroy_process_group()
-
-
-model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
-enc = get_tokenizer("gpt2")
-
-conf = SFTConfig(**OmegaConf.load("sft_trainer/config.yml"))
-dataloader = create_dataloader(
-    "Open-Orca/OpenOrca",
-    enc,
-    batch_size=conf.training_config.batch_size,
-    split="train[:50%]",
-    columns_mapping=SFTColumnsMapping(prompt="question", answer="response"),
-)
-trainer = SFTTrainer(model, enc, dataloader, conf)
-trainer.train()
