@@ -245,10 +245,6 @@ class SFTTrainer(nn.Module):
                 logits, loss = self.model(
                     x, targets=y, attention_mask=mask, shift_labels=True
                 )
-                if loss is None or torch.isnan(loss):
-                    print(x)
-                    print(y)
-                    print(mask)
             loss = loss / self.config.optimizer_config.accumulation_steps
             loss_accum += loss.detach()
             loss.backward()
