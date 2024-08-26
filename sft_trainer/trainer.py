@@ -180,7 +180,7 @@ class SFTTrainer(nn.Module):
         num_return_sequences = 4
         max_length = 32
         tokens = self.dataloader.dataset.instruction_ids
-        tokens.extend(self.encoder.encode_ordinary(" Who is Emmanuel Macron?\n "))
+        tokens.extend(self.encoder.encode_ordinary("Who is Emmanuel Macron?\n "))
         tokens.extend(self.dataloader.dataset.answer_ids)
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
@@ -248,6 +248,10 @@ class SFTTrainer(nn.Module):
                 logits, loss = self.model(
                     x, targets=y, attention_mask=mask, shift_labels=True
                 )
+                if loss is None or torch.isnan(loss):
+                    print(x)
+                    print(y)
+                    print(mask)
             loss = loss / self.config.optimizer_config.accumulation_steps
             loss_accum += loss.detach()
             loss.backward()
