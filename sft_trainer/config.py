@@ -22,6 +22,8 @@ class TrainingConfig:
     step_log_eval_loss: int
     step_save_model: int
     checkpoint_path: str
+    report_to_wandb: bool
+    push_to_hub: bool
 
 
 @dataclass

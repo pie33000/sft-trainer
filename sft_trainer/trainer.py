@@ -16,6 +16,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
 from transformers import AutoModelForCausalLM
 
+import wandb
 from sft_trainer.config import SFTConfig
 from sft_trainer.dataloader import SFTColumnsMapping, create_dataloader
 from shared.model import dynamic_model
@@ -93,6 +94,22 @@ class SFTTrainer(nn.Module):
                 * self.config.ddp_config.num_processes
             ),
         )
+
+        if (
+            self.config.ddp_config.master_process
+            and self.config.training_config.report_to_wandb
+        ):
+            self.run = self.set_up_wandb()
+
+    def set_up_wandb(self):
+        run = wandb.init(
+            project="gpt2",
+            config={
+                "learning_rate": self.config.optimizer_config.learning_rate,
+                "steps": self.config.training_config.max_steps,
+            },
+        )
+        return run
 
     def create_log_dir(self):
         os.makedirs(self.config.training_config.log_path, exist_ok=True)
@@ -249,14 +266,15 @@ class SFTTrainer(nn.Module):
                     "val_loss": loss_accum.item(),
                 }
                 torch.save(checkpoint, checkpoint_path)
-                upload_file(
-                    path_or_fileobj=checkpoint_path,
-                    path_in_repo="model.pt",
-                    repo_id="Pie33000/gpt2-sft-trainer",
-                    token=os.getenv("HF_HUB_TOKEN"),
-                    commit_message=f"Training step - {step}",
-                    run_as_future=True,
-                )
+                if self.config.training_config.push_to_hub:
+                    upload_file(
+                        path_or_fileobj=checkpoint_path,
+                        path_in_repo="model.pt",
+                        repo_id="Pie33000/gpt2-sft-trainer",
+                        token=os.getenv("HF_HUB_TOKEN"),
+                        commit_message=f"Training step - {step}",
+                        run_as_future=True,
+                    )
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -287,6 +305,14 @@ class SFTTrainer(nn.Module):
                         "a",
                     ) as f:
                         f.write(f"{step} train {loss_accum.item():.6f}\n")
+                    wandb.log(
+                        {
+                            "train/loss": loss_accum.item(),
+                            "train/grad_norm": norm,
+                            "train/learning_rate": lr,
+                            "train/epoch": step,
+                        }
+                    )
 
                 loss_accum = 0
         if self.config.ddp_config.num_processes > 1:

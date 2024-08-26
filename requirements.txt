@@ -5,3 +5,4 @@ omegaconf==2.3.0
 torch==2.2.0
 torchtune
 transformers==4.44.0
+wandb==0.17.7

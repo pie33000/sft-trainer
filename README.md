@@ -9,6 +9,7 @@ First, create a new Conda environment and install the necessary dependencies:
     conda create -n llm-ft python=3.10
     conda activate llm-ft
     pip install .
+    wandb login
 
 
 ## Usage
