@@ -15,18 +15,17 @@ from shared.utils import setup_logger
 logger = setup_logger(__name__)
 
 
-def pad_or_truncate(sequence, max_length, pad_value):
+def pad_or_truncate(sequence, attention_mask, max_length, pad_value):
     """
     Pads the sequence to the max_length with pad_value or truncates it if necessary.
     """
     seq_len = len(sequence)
-    mask = [1] * seq_len
     if seq_len < max_length:
-        return sequence + [pad_value] * (max_length - seq_len), mask + [0] * (
+        return sequence + [pad_value] * (max_length - seq_len), attention_mask + [0] * (
             max_length - seq_len
         )
     else:
-        return sequence[:max_length], mask[:max_length]
+        return sequence[:max_length], attention_mask[:max_length]
 
 
 def collate_fn(batch, max_sequence_length: int = 1024, eos_token_id: int = 50256):
@@ -38,7 +37,10 @@ def collate_fn(batch, max_sequence_length: int = 1024, eos_token_id: int = 50256
 
     for sample in batch:
         input_ids, mask_input_ids = pad_or_truncate(
-            sample["input_ids"], max_sequence_length, eos_token_id
+            sample["input_ids"],
+            sample["attention_mask"],
+            max_sequence_length,
+            eos_token_id,
         )
         label_ids, _ = pad_or_truncate(sample["label_ids"], max_sequence_length, -100)
 
@@ -101,6 +103,7 @@ class HuggingFaceDataset(Dataset):
             "answer": self.dataset[idx][self.answer],
             "input_ids": input_ids,
             "label_ids": labels,
+            "attention_mask": [1] * len(input_ids) - 1 + [0],
         }
 
 

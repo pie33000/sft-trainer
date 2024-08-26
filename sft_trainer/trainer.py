@@ -53,7 +53,7 @@ class SFTTrainer(nn.Module):
     ):
         super(SFTTrainer, self).__init__()
         self.config = config
-        self.create_log_dir()
+        self.create_dir()
         self.encoder: tiktoken.Encoding = encoder
         self.dataloader = dataloader
         self.val_dataloader = val_dataloader
@@ -85,6 +85,10 @@ class SFTTrainer(nn.Module):
             master_process=self.config.ddp_config.master_process,
         )
 
+        self.scheduler = torch.optim.lr_scheduler.LinearLR(
+            self.optimizer, total_iters=self.config.training_config.max_steps
+        )
+
         self.grad_accum_steps = max(
             10,
             10
@@ -111,8 +115,9 @@ class SFTTrainer(nn.Module):
         )
         return run
 
-    def create_log_dir(self):
+    def create_dir(self):
         os.makedirs(self.config.training_config.log_path, exist_ok=True)
+        os.makedirs(self.config.training_config.checkpoint_path, exist_ok=True)
 
     def get_lr(self, iter):
         # 1) linear warmup for warmup_iters steps
@@ -284,9 +289,11 @@ class SFTTrainer(nn.Module):
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
-                lr = self.get_lr(step)
-                for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = lr
+                self.scheduler.step()
+                lr = self.optimizer.param_groups[0]["lr"]
+                # lr = self.get_lr(step)
+                """for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = lr"""
                 if self.device_type == "cuda":
                     torch.cuda.synchronize()
                 t1 = time.time()
@@ -311,14 +318,16 @@ class SFTTrainer(nn.Module):
                         "a",
                     ) as f:
                         f.write(f"{step} train {loss_accum.item():.6f}\n")
-                    wandb.log(
-                        {
-                            "train/loss": loss_accum.item(),
-                            "train/grad_norm": norm,
-                            "train/learning_rate": lr,
-                            "train/epoch": step,
-                        }
-                    )
+
+                    if self.config.training_config.report_to_wandb:
+                        wandb.log(
+                            {
+                                "train/loss": loss_accum.item(),
+                                "train/grad_norm": norm,
+                                "train/learning_rate": lr,
+                                "train/epoch": step,
+                            }
+                        )
 
                 loss_accum = 0
         if self.config.ddp_config.num_processes > 1:

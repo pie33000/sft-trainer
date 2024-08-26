@@ -7,8 +7,8 @@ optimizer_config:
   accumulation_steps: 10
 
 training_config:
-  max_steps: 10000
-  batch_size: 1
+  max_steps: 20000
+  batch_size: 4
   epochs: 10
   sequence_length: 1024
   log_path: logs
@@ -16,8 +16,8 @@ training_config:
   step_log_eval_loss: 50
   step_save_model: 500
   checkpoint_path: checkpoints
-  report_to_wandb: true
-  push_to_hub: true
+  report_to_wandb: false
+  push_to_hub: false
 
 ddp_config:
   master_process: true
