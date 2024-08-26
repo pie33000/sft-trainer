@@ -123,6 +123,12 @@ class SFTTrainer(nn.Module):
                 / self.config.optimizer_config.warmup_steps
             )
         # 3) in between, use cosine decay down to min learning rate
+        print(iter)
+        print(type(iter))
+        print(self.config.optimizer_config.warmup_steps)
+        print(type(self.config.optimizer_config.warmup_steps))
+        print(self.config.training_config.max_steps)
+        print(type(self.config.training_config.max_steps))
         decay_ratio = (iter - self.config.optimizer_config.warmup_steps) / (
             self.config.training_config.max_steps
             - self.config.optimizer_config.warmup_steps

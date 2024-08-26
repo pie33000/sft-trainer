@@ -31,10 +31,10 @@ def pad_or_truncate(sequence, max_length, pad_value):
 
 def collate_fn(batch, max_sequence_length: int = 1024, eos_token_id: int = 50256):
     x, y, mask = [], [], []
-    max_batch_sequence = 0
+    """max_batch_sequence = 0
     for sample in batch:
         max_batch_sequence = max(max_batch_sequence, len(sample["input_ids"]))
-    max_sequence_length = min(max_sequence_length, max_batch_sequence)
+    max_sequence_length = min(max_sequence_length, max_batch_sequence)"""
 
     for sample in batch:
         input_ids, mask_input_ids = pad_or_truncate(
