@@ -8,6 +8,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from huggingface_hub import upload_file
 from omegaconf import OmegaConf
 from tiktoken.core import Encoding
 from torch.distributed import destroy_process_group, init_process_group
@@ -151,23 +152,14 @@ class SFTTrainer(nn.Module):
                 os.path.join(self.config.training_config.log_path, "sft.txt"), "a"
             ) as f:
                 f.write(f"{step} val {val_loss_accum.item():.4f}\n")
-            if step > 0 and (step % self.config.training_config.step_save_model == 0):
-                # optionally write model checkpoints
-                checkpoint_path = os.path.join("log", f"model_{step:05d}.pt")
-                checkpoint = {
-                    "model": self.raw_model.state_dict(),
-                    "step": step,
-                    "val_loss": val_loss_accum.item(),
-                }
-                torch.save(checkpoint, checkpoint_path)
 
     def generate(self):
         self.model.eval()
         num_return_sequences = 4
         max_length = 32
-        tokens = self.val_dataloader.dataset.instruction_ids
+        tokens = self.dataloader.dataset.instruction_ids
         tokens.extend(self.encoder.encode_ordinary(" Who is Emmanuel Macron?\n "))
-        tokens.extend(self.val_dataloader.dataset.answer_ids)
+        tokens.extend(self.dataloader.dataset.answer_ids)
         tokens = torch.tensor(tokens, dtype=torch.long)
         tokens = tokens.unsqueeze(0).repeat(num_return_sequences, 1)
         xgen = tokens.to(self.device, dtype=torch.long)
@@ -208,7 +200,8 @@ class SFTTrainer(nn.Module):
         for step, batch in enumerate(self.dataloader):
             t0 = time.time()
             if step > 0 and step % self.config.training_config.step_log_eval_loss == 0:
-                self.calculate_validation_loss(step)
+                if self.val_dataloader:
+                    self.calculate_validation_loss(step)
                 self.generate()
             self.model.train()
             if step == 0:
@@ -241,7 +234,29 @@ class SFTTrainer(nn.Module):
                 dist.all_reduce(loss_accum, op=dist.ReduceOp.AVG)
             norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
             # determine and set the learning rate for this iteration
-
+            if (
+                step > 0
+                and (step % self.config.training_config.step_save_model == 0)
+                and self.config.ddp_config.master_process
+            ):
+                # optionally write model checkpoints
+                checkpoint_path = os.path.join(
+                    self.config.training_config.checkpoint_path, f"model_{step:05d}.pt"
+                )
+                checkpoint = {
+                    "model": self.raw_model.state_dict(),
+                    "step": step,
+                    "val_loss": loss_accum.item(),
+                }
+                torch.save(checkpoint, checkpoint_path)
+                upload_file(
+                    path_or_fileobj=checkpoint_path,
+                    path_in_repo="model.pt",
+                    repo_id="Pie33000/gpt2-sft-trainer",
+                    token=os.getenv("HF_HUB_TOKEN"),
+                    commit_message=f"Training step - {step}",
+                    run_as_future=True,
+                )
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
                 self.optimizer.zero_grad()
@@ -280,20 +295,14 @@ class SFTTrainer(nn.Module):
 
 model = AutoModelForCausalLM.from_pretrained("openai-community/gpt2")
 enc = get_tokenizer("gpt2")
-dataloader = create_dataloader(
-    "teknium/openhermes",
-    enc,
-    batch_size=4,
-    columns_mapping=SFTColumnsMapping(prompt="instruction", answer="output"),
-)
-val_dataloader = create_dataloader(
-    "teknium/openhermes",
-    enc,
-    batch_size=4,
-    columns_mapping=SFTColumnsMapping(prompt="instruction", answer="output"),
-    split="train[:10]",
-)
 
 conf = SFTConfig(**OmegaConf.load("sft_trainer/config.yml"))
-trainer = SFTTrainer(model, enc, dataloader, conf, val_dataloader=val_dataloader)
+dataloader = create_dataloader(
+    "Open-Orca/OpenOrca",
+    enc,
+    batch_size=conf.training_config.batch_size,
+    split="train[:50%]",
+    columns_mapping=SFTColumnsMapping(prompt="question", answer="response"),
+)
+trainer = SFTTrainer(model, enc, dataloader, conf)
 trainer.train()

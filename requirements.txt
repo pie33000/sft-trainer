@@ -1,4 +1,5 @@
 datasets==2.20.0
+huggingface_hub==0.24.5
 tiktoken==0.7.0
 omegaconf==2.3.0
 torch==2.2.0

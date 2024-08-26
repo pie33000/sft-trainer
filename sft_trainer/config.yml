@@ -8,13 +8,13 @@ optimizer_config:
 
 training_config:
   max_steps: 20000
-  batch_size: 8
+  batch_size: 1
   epochs: 10
   sequence_length: 1024
   log_path: logs
   step_log_training_loss: 10
   step_log_eval_loss: 50
-  step_save_model: 5000
+  step_save_model: 20
   checkpoint_path: checkpoints
 
 ddp_config:
