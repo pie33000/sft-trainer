@@ -277,6 +277,7 @@ class SFTTrainer(nn.Module):
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
 <<<<<<< HEAD
+<<<<<<< HEAD
                 self.optimizer.zero_grad()
                 #self.scheduler.step()
                 #lr = self.optimizer.param_groups[0]["lr"]
@@ -284,6 +285,8 @@ class SFTTrainer(nn.Module):
                 for param_group in self.optimizer.param_groups:
                     param_group["lr"] = lr
 =======
+=======
+>>>>>>> 4146ab3 (use linear scheduler)
                 scheduler.step()
                 lr = self.optimizer.param_groups[0]["lr"]
                 # lr = self.get_lr(step)
