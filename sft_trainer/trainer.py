@@ -1,16 +1,14 @@
 import math
 import os
 import time
-from dataclasses import dataclass
-from functools import partial
 
 import tiktoken
 import torch
 import torch.distributed as dist
-from safetensors.torch import save_model
 import torch.nn as nn
 import torch.nn.functional as F
 from huggingface_hub import upload_file
+from safetensors.torch import save_model
 from tiktoken.core import Encoding
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -256,13 +254,15 @@ class SFTTrainer(nn.Module):
                 and self.config.ddp_config.master_process
             ):
                 # optionally write model checkpoints
-                checkpoint_path = os.path.join(self.config.training_config.checkpoint_path, "model.safetensors")
+                checkpoint_path = os.path.join(
+                    self.config.training_config.checkpoint_path, "model.safetensors"
+                )
                 checkpoint = {
                     "model": self.raw_model.model.state_dict(),
                     "step": step,
                     "val_loss": loss_accum.item(),
                 }
-                #torch.save(self.raw_model.model.state_dict(), checkpoint_path)
+                # torch.save(self.raw_model.model.state_dict(), checkpoint_path)
                 save_model(self.raw_model.model, checkpoint_path)
                 if self.config.training_config.push_to_hub:
                     upload_file(
@@ -276,23 +276,15 @@ class SFTTrainer(nn.Module):
 
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
-<<<<<<< HEAD
-<<<<<<< HEAD
                 self.optimizer.zero_grad()
-                #self.scheduler.step()
-                #lr = self.optimizer.param_groups[0]["lr"]
-                lr = self.get_lr(step)
+                # self.scheduler.step()
+                # lr = self.optimizer.param_groups[0]["lr"]
+                """lr = self.get_lr(step)
                 for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = lr
-=======
-=======
->>>>>>> 4146ab3 (use linear scheduler)
+                    param_group["lr"] = lr"""
                 scheduler.step()
                 lr = self.optimizer.param_groups[0]["lr"]
                 # lr = self.get_lr(step)
-                """for param_group in self.optimizer.param_groups:
-                    param_group["lr"] = lr"""
->>>>>>> 4146ab3 (use linear scheduler)
                 if self.device_type == "cuda":
                     torch.cuda.synchronize()
                 t1 = time.time()
