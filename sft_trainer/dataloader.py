@@ -75,7 +75,7 @@ class HuggingFaceDataset(Dataset):
         self.prompt: str = column_mapping.prompt
         self.answer: str = column_mapping.answer
         self.prompt_key: str = "### Question: "
-        self.answer_key: str = "\n ### Answer: "
+        self.answer_key: str = "\n ### Answer:"
         self.instruction_ids: list[int] = self.tokenizer.encode_ordinary(
             self.prompt_key
         )
