@@ -2,6 +2,7 @@ import math
 import os
 import time
 from dataclasses import dataclass
+from functools import partial
 
 import tiktoken
 import torch
@@ -26,18 +27,6 @@ from .config import SFTConfig
 # databricks-dolly-15k
 # https://huggingface.co/datasets/teknium/openhermes?row=25
 # https://huggingface.co/datasets/HuggingFaceH4/ultrachat_200k?row=9
-
-
-@dataclass
-class TrainingConfig:
-    batch_size: int
-    sequence_length: int
-    min_lr: float = 6e-4 * 0.1
-    max_lr: float = 6e-4
-    warmer_steps: int = 50
-    max_steps: int = 500
-    validation_steps: int = 10
-    checkpoint_steps: int = 20
 
 
 class SFTTrainer(nn.Module):
@@ -82,20 +71,7 @@ class SFTTrainer(nn.Module):
             device_type=self.device,
             master_process=self.config.ddp_config.master_process,
         )
-
-        self.scheduler = torch.optim.lr_scheduler.LinearLR(
-            self.optimizer, total_iters=self.config.training_config.max_steps
-        )
-
-        self.grad_accum_steps = max(
-            10,
-            10
-            // (
-                self.config.training_config.batch_size
-                * self.config.training_config.sequence_length
-                * self.config.ddp_config.num_processes
-            ),
-        )
+        self.num_steps = len(self.dataloader)
 
         if (
             self.config.ddp_config.master_process
@@ -177,7 +153,7 @@ class SFTTrainer(nn.Module):
         self.model.eval()
         num_return_sequences = 4
         max_length = 32
-        tokens = self.dataloader.dataset.instruction_ids
+        tokens = self.dataloader.dataset.instruction_ids.copy()
         tokens.extend(self.encoder.encode_ordinary("Who is Emmanuel Macron?"))
         tokens.extend(self.dataloader.dataset.answer_ids)
         tokens = torch.tensor(tokens, dtype=torch.long)
@@ -215,7 +191,26 @@ class SFTTrainer(nn.Module):
             decoded = self.encoder.decode(tokens)
             print(f"rank {self.config.ddp_config.process_rank} sample {i}: {decoded}")
 
+    @staticmethod
+    def get_linear_schedule_with_warmup_lambda(num_warmup_steps, num_training_steps):
+        def lr_lambda(step):
+            if step < num_warmup_steps:
+                return float(step) / float(max(1, num_warmup_steps))
+            progress = float(step - num_warmup_steps) / float(
+                max(1, num_training_steps - num_warmup_steps)
+            )
+            return max(0.0, 1.0 - progress)
+
+        return lr_lambda
+
     def train(self):
+        scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optimizer,
+            lr_lambda=self.get_linear_schedule_with_warmup_lambda(
+                num_warmup_steps=self.config.optimizer_config.warmup_steps,
+                num_training_steps=self.num_steps,
+            ),
+        )
         loss_accum = 0
         for step, batch in enumerate(self.dataloader):
             t0 = time.time()
@@ -248,6 +243,7 @@ class SFTTrainer(nn.Module):
                 )
             loss = loss / self.config.optimizer_config.accumulation_steps
             loss_accum += loss.detach()
+            self.optimizer.zero_grad()
             loss.backward()
 
             if self.config.ddp_config.num_processes > 1:
@@ -277,14 +273,23 @@ class SFTTrainer(nn.Module):
                         commit_message=f"Training step - {step}",
                         run_as_future=True,
                     )
+
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
                 self.optimizer.step()
+<<<<<<< HEAD
                 self.optimizer.zero_grad()
                 #self.scheduler.step()
                 #lr = self.optimizer.param_groups[0]["lr"]
                 lr = self.get_lr(step)
                 for param_group in self.optimizer.param_groups:
                     param_group["lr"] = lr
+=======
+                scheduler.step()
+                lr = self.optimizer.param_groups[0]["lr"]
+                # lr = self.get_lr(step)
+                """for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = lr"""
+>>>>>>> 4146ab3 (use linear scheduler)
                 if self.device_type == "cuda":
                     torch.cuda.synchronize()
                 t1 = time.time()
@@ -302,7 +307,7 @@ class SFTTrainer(nn.Module):
                     and step > 0
                 ):
                     print(
-                        f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
+                        f"step {step:5d} | loss: {loss_accum.item():.6f} | lr {lr:.8e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}"
                     )
                     with open(
                         os.path.join(self.config.training_config.log_path, "sft.txt"),
