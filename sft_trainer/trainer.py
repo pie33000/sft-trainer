@@ -7,8 +7,9 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from huggingface_hub import upload_file
-from safetensors.torch import save_model
+from huggingface_hub import upload_file, upload_folder
+
+# from safetensors.torch import save_model
 from tiktoken.core import Encoding
 from torch.distributed import destroy_process_group, init_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -262,16 +263,18 @@ class SFTTrainer(nn.Module):
                     "step": step,
                     "val_loss": loss_accum.item(),
                 }
+                self.raw_model.model.save_pretrained(
+                    self.config.training_config.checkpoint_path, from_pt=True
+                )
                 # torch.save(self.raw_model.model.state_dict(), checkpoint_path)
-                save_model(self.raw_model.model, checkpoint_path)
+                # save_model(self.raw_model.model, checkpoint_path)
                 if self.config.training_config.push_to_hub:
-                    upload_file(
-                        path_or_fileobj=checkpoint_path,
-                        path_in_repo="model.safetensors",
+                    upload_folder(
+                        folder_path=self.config.training_config.checkpoint_path,
                         repo_id="Pie33000/gpt2-sft-trainer",
                         token=os.getenv("HF_HUB_TOKEN"),
                         commit_message=f"Training step - {step}",
-                        run_as_future=True,
+                        run_as_future=False,
                     )
 
             if step % self.config.optimizer_config.accumulation_steps == 0 and step > 0:
